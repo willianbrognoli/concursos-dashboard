@@ -11,11 +11,15 @@
   const els = {
     q: $("f-q"), regiao: $("f-regiao"), uf: $("f-uf"),
     inscricaoAte: $("f-inscricao-ate"), provaDe: $("f-prova-de"), provaAte: $("f-prova-ate"),
-    order: $("f-order"), status: $("f-status"),
+    order: $("f-order"), fase: $("f-fase"),
   };
 
   function materiasSelecionadas() {
     return Array.from(document.querySelectorAll(".f-materia:checked")).map(c => c.value);
+  }
+
+  function etapasSelecionadas() {
+    return Array.from(document.querySelectorAll(".f-etapa:checked")).map(c => c.value);
   }
 
   function fmtData(iso) {
@@ -51,8 +55,17 @@
     }
     const urgente = dias !== null && dias >= 0 && dias <= 7;
 
+    // fase derivada das datas
+    const hoje = new Date(); hoje.setHours(0, 0, 0, 0);
+    const provaPassou = c.prova_data && new Date(c.prova_data + "T00:00:00") < hoje;
+    const inscricaoPassou = dias !== null && dias < 0;
+    let faseBadge = "";
+    if (provaPassou) faseBadge = `<span class="fase-badge realizada">Prova realizada</span>`;
+    else if (inscricaoPassou) faseBadge = `<span class="fase-badge aguardando">Aguardando prova</span>`;
+
     const tags = (c.materias || []).slice(0, 6).map(m => `<span class="tag">${esc(m)}</span>`).join("");
     const mais = (c.materias || []).length > 6 ? `<span class="tag mais">+${c.materias.length - 6}</span>` : "";
+    const etapaTags = (c.etapas || []).map(e => `<span class="tag etapa">${esc(e)}</span>`).join("");
 
     const meta = [];
     if (c.vagas) meta.push(`<span><b>${c.vagas.toLocaleString("pt-BR")}</b> vaga${c.vagas > 1 ? "s" : ""}</span>`);
@@ -62,7 +75,7 @@
     if (c.taxa) meta.push(`<span>taxa: ${esc(c.taxa)}</span>`);
 
     const prova = c.prova_data
-      ? `<span class="prova-chip">📝 prova: <b>${fmtData(c.prova_data)}</b></span>`
+      ? `<span class="prova-chip">📝 prova${provaPassou ? " realizada em" : ":"} <b>${fmtData(c.prova_data)}</b></span>`
       : `<span class="prova-chip" title="${esc(c.prova_texto || '')}">prova: a divulgar</span>`;
 
     const link = c.url_inscricao || c.url_fonte;
@@ -78,7 +91,8 @@
       <div class="card-head"><h3 class="card-title">${fonte}</h3>${ufPill}</div>
       ${c.cargos ? `<div class="card-cargos">${esc(c.cargos)}</div>` : ""}
       <div class="card-meta">${meta.join("")}</div>
-      ${deadlineTxt ? `<div class="deadline ${deadlineCls}">⏳ ${deadlineTxt}</div>` : ""}
+      ${(deadlineTxt || faseBadge) ? `<div class="deadline ${deadlineCls}">${faseBadge}${deadlineTxt && !inscricaoPassou ? "⏳ " + deadlineTxt : ""}</div>` : ""}
+      ${etapaTags ? `<div class="tags">${etapaTags}</div>` : ""}
       ${(tags || mais) ? `<div class="tags">${tags}${mais}</div>` : ""}
       <div class="card-foot">${prova}
         ${link ? `<a class="btn-insc" href="${esc(link)}" target="_blank" rel="noopener">Ver edital ↗</a>` : ""}
@@ -94,10 +108,12 @@
     if (els.inscricaoAte.value) p.set("inscricao_ate", els.inscricaoAte.value);
     if (els.provaDe.value) p.set("prova_de", els.provaDe.value);
     if (els.provaAte.value) p.set("prova_ate", els.provaAte.value);
-    p.set("status", els.status.value);
+    p.set("fase", els.fase.value);
     p.set("order", els.order.value);
     const mats = materiasSelecionadas();
     if (mats.length) p.set("materia", mats.join("|"));
+    const etps = etapasSelecionadas();
+    if (etps.length) p.set("etapa", etps.join("|"));
 
     cards.style.opacity = ".5";
     try {
@@ -157,9 +173,10 @@
   function debounced() { clearTimeout(t); t = setTimeout(carregar, 300); }
 
   els.q.addEventListener("input", debounced);
-  ["regiao", "uf", "inscricaoAte", "provaDe", "provaAte", "order", "status"].forEach(k =>
+  ["regiao", "uf", "inscricaoAte", "provaDe", "provaAte", "order", "fase"].forEach(k =>
     els[k].addEventListener("change", carregar));
   document.querySelectorAll(".f-materia").forEach(c => c.addEventListener("change", carregar));
+  document.querySelectorAll(".f-etapa").forEach(c => c.addEventListener("change", carregar));
 
   const buscaMateria = $("f-materia-busca");
   if (buscaMateria) buscaMateria.addEventListener("input", () => {
@@ -172,8 +189,9 @@
   $("f-limpar").addEventListener("click", () => {
     els.q.value = ""; els.regiao.value = ""; els.uf.value = "";
     els.inscricaoAte.value = ""; els.provaDe.value = ""; els.provaAte.value = "";
-    els.order.value = "inscricao_fim"; els.status.value = "aberto";
+    els.order.value = "inscricao_fim"; els.fase.value = "abertas";
     document.querySelectorAll(".f-materia:checked").forEach(c => (c.checked = false));
+    document.querySelectorAll(".f-etapa:checked").forEach(c => (c.checked = false));
     if (buscaMateria) { buscaMateria.value = ""; }
     document.querySelectorAll("#materias-box .chk").forEach(l => (l.style.display = ""));
     carregar();
