@@ -109,6 +109,10 @@
         <input name="materias" placeholder="Direito Constitucional, Língua Portuguesa">
         <small>Sugestões: {{ materias_all[:12]|join(', ') }}…</small>
       </label>
+      <label class="span2">Fases do certame (separadas por vírgula)
+        <input name="etapas" placeholder="Prova objetiva, Heteroidentificação">
+        <small>Opções: {{ etapas_all|join(', ') }}</small>
+      </label>
       <label class="span2">Resumo<textarea name="resumo" rows="2"></textarea></label>
       <button class="btn-gold span2">Salvar concurso</button>
     </form>

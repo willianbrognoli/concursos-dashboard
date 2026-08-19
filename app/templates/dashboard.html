@@ -56,12 +56,21 @@
     </label>
 
     <label class="f-label">Situação
-      <select id="f-status">
-        <option value="aberto">Inscrições abertas</option>
-        <option value="encerrado">Encerrados</option>
-        <option value="todos">Todos</option>
+      <select id="f-fase">
+        <option value="abertas">Inscrições abertas</option>
+        <option value="aguardando_prova">Inscrições encerradas — aguardando prova</option>
+        <option value="prova_realizada">Prova realizada</option>
+        <option value="todas">Todas</option>
       </select>
     </label>
+
+    <div class="f-label">Fases do concurso
+      <div class="materias-box etapas-box">
+        {% for e in etapas %}
+        <label class="chk"><input type="checkbox" value="{{ e }}" class="f-etapa"> <span>{{ e }}</span></label>
+        {% endfor %}
+      </div>
+    </div>
 
     <div class="f-label">Matérias / áreas
       <input type="search" id="f-materia-busca" placeholder="filtrar lista..." class="mini-search">
