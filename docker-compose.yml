@@ -1,0 +1,20 @@
+# Referência para rodar fora do Easypanel (docker compose up -d --build)
+services:
+  concursos-dashboard:
+    build: .
+    container_name: concursos-dashboard
+    restart: unless-stopped
+    ports:
+      - "8010:8000"
+    environment:
+      SECRET_KEY: "troque-por-uma-chave-longa-e-aleatoria"
+      ADMIN_EMAIL: "emanuel@fauthefreitas.adv.br"
+      OPEN_REGISTRATION: "true"
+      SCRAPE_HOUR: "6"
+      SCRAPE_ON_START: "true"
+      TZ: America/Sao_Paulo
+    volumes:
+      - concursos_data:/data
+
+volumes:
+  concursos_data:
