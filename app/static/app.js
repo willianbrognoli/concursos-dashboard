@@ -2,7 +2,11 @@
 (function () {
   const $ = (id) => document.getElementById(id);
   const cards = $("cards"), empty = $("empty");
+  const pagerTop = $("pager-top"), pagerBottom = $("pager-bottom");
+  const PAGE_SIZE = 24;
   let t = null;
+  let lista = [];       // resultado completo do filtro atual
+  let pagina = 1;
 
   const els = {
     q: $("f-q"), regiao: $("f-regiao"), uf: $("f-uf"),
@@ -100,8 +104,9 @@
       const r = await fetch("/api/concursos?" + p.toString());
       if (r.status === 401) { location.href = "/login"; return; }
       const data = await r.json();
-      cards.innerHTML = data.concursos.map(cardHTML).join("");
-      empty.hidden = data.concursos.length > 0;
+      lista = data.concursos;
+      pagina = 1;
+      renderPagina();
       $("st-count").textContent = data.count.toLocaleString("pt-BR");
       $("st-vagas").textContent = (data.stats.vagas || 0).toLocaleString("pt-BR");
       $("st-prova").textContent = (data.stats.com_prova || 0).toLocaleString("pt-BR");
@@ -111,6 +116,42 @@
     } finally {
       cards.style.opacity = "1";
     }
+  }
+
+  function renderPagina() {
+    const totalPag = Math.max(1, Math.ceil(lista.length / PAGE_SIZE));
+    if (pagina > totalPag) pagina = totalPag;
+    const ini = (pagina - 1) * PAGE_SIZE;
+    cards.innerHTML = lista.slice(ini, ini + PAGE_SIZE).map(cardHTML).join("");
+    empty.hidden = lista.length > 0;
+    renderPager(pagerTop, totalPag);
+    renderPager(pagerBottom, totalPag);
+  }
+
+  function renderPager(el, totalPag) {
+    if (lista.length <= PAGE_SIZE) { el.innerHTML = ""; return; }
+    const ini = (pagina - 1) * PAGE_SIZE + 1;
+    const fim = Math.min(pagina * PAGE_SIZE, lista.length);
+    let html = `<span class="pager-info">${ini}–${fim} de ${lista.length}</span>`;
+    html += `<button data-pg="${pagina - 1}" ${pagina === 1 ? "disabled" : ""} aria-label="Página anterior">‹</button>`;
+    // janela de páginas: 1 ... p-1 p p+1 ... última
+    const pgs = new Set([1, 2, pagina - 1, pagina, pagina + 1, totalPag - 1, totalPag]);
+    let ultima = 0;
+    for (const p of [...pgs].filter(p => p >= 1 && p <= totalPag).sort((a, b) => a - b)) {
+      if (p - ultima > 1) html += `<span class="pager-info">…</span>`;
+      html += `<button data-pg="${p}" class="${p === pagina ? "ativa" : ""}">${p}</button>`;
+      ultima = p;
+    }
+    html += `<button data-pg="${pagina + 1}" ${pagina === totalPag ? "disabled" : ""} aria-label="Próxima página">›</button>`;
+    el.innerHTML = html;
+    el.querySelectorAll("button[data-pg]").forEach(b => b.addEventListener("click", () => {
+      const pg = parseInt(b.dataset.pg, 10);
+      if (pg >= 1 && pg !== pagina) {
+        pagina = pg;
+        renderPagina();
+        pagerTop.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      }
+    }));
   }
 
   function debounced() { clearTimeout(t); t = setTimeout(carregar, 300); }
