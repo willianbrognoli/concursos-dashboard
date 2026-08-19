@@ -407,6 +407,16 @@ def run_scrape(max_details: int = 80, delay: float = 1.0) -> dict:
             log.warning("Detalhe falhou p/ %s: %s", row["url_fonte"], e)
         time.sleep(delay)
 
+    # re-detecção de matérias nos abertos (aplica padrões novos ao que já existe)
+    import json as _json
+    with dbm.get_db() as db:
+        for r in db.execute("SELECT id, orgao, cargos, resumo, materias FROM concursos WHERE status='aberto'").fetchall():
+            novas = set(detectar_materias(r["orgao"], r["cargos"], r["resumo"]))
+            atuais = set(_json.loads(r["materias"] or "[]"))
+            if novas - atuais:
+                db.execute("UPDATE concursos SET materias=?, updated_at=? WHERE id=?",
+                           (_json.dumps(sorted(atuais | novas), ensure_ascii=False), dbm.now_iso(), r["id"]))
+
     rss = collect_rss(session)
     errors += rss["errors"]
     detail_msgs.append(f"RSS: {rss['added']} notícias novas")

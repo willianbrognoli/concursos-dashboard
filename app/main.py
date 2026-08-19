@@ -198,8 +198,8 @@ def dashboard(request: Request):
         materias = dbm.all_materias(db)
         st = dbm.stats(db)
         noticias = dbm.latest_noticias(db, limit=12)
-    if not materias:
-        materias = sorted(MATERIAS_PATTERNS.keys())
+    # lista completa do dicionário + o que existir na base (edições manuais)
+    materias = sorted(set(materias) | set(MATERIAS_PATTERNS.keys()))
     return templates.TemplateResponse("dashboard.html", {
         "request": request, "user": user, "materias": materias,
         "ufs": {k: v[0] for k, v in UFS.items()}, "regioes": REGIOES, "stats": st,
