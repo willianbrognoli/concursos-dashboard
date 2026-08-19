@@ -1,13 +1,15 @@
-"""Coletor de concursos abertos a partir do PCI Concursos.
+"""Coletor de concursos a partir dos blogs Gran Cursos e Estratégia Concursos.
 
-Estratégia em duas etapas:
-1. Páginas de listagem por região (/concursos/<regiao>/): órgão, UF, vagas,
-   salário, cargos, escolaridade e prazo de inscrição.
-2. Página de detalhe (notícia) de cada concurso novo: período de inscrição,
-   data da prova, banca, taxa, link de inscrição e detecção de matérias.
+Fluxo (v2.0 — sem PCI):
+1. Lê os feeds RSS dos dois blogs.
+2. Para cada notícia nova sobre edital/concurso, baixa o ARTIGO COMPLETO.
+3. Extrai do artigo: órgão, UF, vagas, salário, cargos, período de inscrição,
+   data da prova, banca, taxa, link de inscrição, MATÉRIAS e as FASES do
+   certame (objetiva, discursiva, TAF, psicológica, heteroidentificação etc.).
+4. Faz upsert por órgão+UF — notícias dos dois blogs sobre o mesmo concurso
+   alimentam o MESMO card (fases e matérias vão sendo mescladas).
 
-O parser é deliberadamente tolerante a mudanças de markup: trabalha sobre o
-texto dos blocos, não sobre classes CSS específicas.
+O parser trabalha sobre o texto do artigo, tolerante a mudanças de layout.
 """
 import logging
 import re
@@ -20,19 +22,14 @@ import requests
 from bs4 import BeautifulSoup
 
 from . import db as dbm
-from .materias import UFS, detectar_materias, regiao_da_uf
+from .materias import NOMES_UF, UFS, detectar_etapas, detectar_materias, regiao_da_uf
 
 log = logging.getLogger("scraper")
 
-BASE = "https://www.pciconcursos.com.br"
-REGIOES_SLUGS = {
-    "Norte": ["norte"],
-    "Nordeste": ["nordeste"],
-    "Centro-Oeste": ["centrooeste", "centro-oeste", "centro_oeste"],
-    "Sudeste": ["sudeste"],
-    "Sul": ["sul"],
-    "Nacional": ["nacional"],
-}
+RSS_FEEDS = [
+    ("Gran Cursos", "https://blog.grancursosonline.com.br/feed/"),
+    ("Estratégia", "https://www.estrategiaconcursos.com.br/blog/feed/"),
+]
 
 HEADERS = {
     "User-Agent": ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -53,11 +50,31 @@ BANCAS = [
     "FAUEL", "Fundep", "NC/UFPR", "UFPR", "Avança SP", "Instituto Access",
     "Legalle", "OMNI", "Instituto Verbena", "IGEDUC", "Itame", "Máxima",
     "Fafipa", "FAU", "Klc", "MS Concursos", "Gualimp", "Método", "Reis & Reis",
+    "Cetro", "Instituto Mais", "IBAM", "Selecon", "FUNDEPE", "COSEAC",
 ]
 
 DATE_RE = re.compile(r"(\d{1,2})/(\d{1,2})/(\d{2,4})")
 DATE_RANGE_RE = re.compile(r"(\d{1,2})/(\d{1,2})(?:/(\d{4}))?\s*(?:a|à|ate|até)\s*(\d{1,2})/(\d{1,2})/(\d{4})", re.I)
 EXTENSO_RE = re.compile(r"(\d{1,2})º?\s+de\s+([a-zç]+)(?:\s+de\s+(\d{4}))?", re.I)
+
+# título precisa parecer notícia de concurso/edital…
+TITULO_CONCURSO_RE = re.compile(r"concurso|edital|processo seletivo|inscri|vagas", re.I)
+# …e não ser conteúdo de estudo/marketing
+TITULO_RUIDO_RE = re.compile(
+    r"como estudar|dicas? de|simulado|apostila|mapa mental|questoes comentadas|"
+    r"cronograma de estudos|resumo (?:de|sobre)|aula gratis|curso gratuito|"
+    r"gabarito extraoficial|correcao (?:de|da) prova|raio[- ]?x|plano de estudos|"
+    r"o que (?:e|sao)|quanto ganha|saiba como|entenda", re.I)
+
+VERBOS_TITULO = (
+    "tem|teve|abre|abriu|abrem|publica|publicou|publicado|oferece|oferta|esta|está|"
+    "saiu|sai|divulga|divulgou|divulgado|prorroga|prorrogou|prorrogado|retifica|"
+    "retificou|retificado|recebe|encerra|anuncia|anunciou|lanca|lança|lancou|lançou|"
+    "convoca|forma|contara|contará|define|confirma|confirmado|autorizado|autoriza|"
+    "iminente|previsto|prevista|aguarda|libera|liberado|homologa|homologado|reabre|"
+    "cancela|cancelado|suspende|suspenso|sera|será|ainda|pode|deve|segue|preve|prevê"
+)
+ORGAO_CUT_RE = re.compile(r"\s+(?:" + VERBOS_TITULO + r")\b.*$", re.I)
 
 
 def _norm(s: str) -> str:
@@ -93,121 +110,108 @@ def fetch(url: str, session: requests.Session) -> str:
     return r.text
 
 
-# ------------------------------------------------------------- listagem
-ESCOLARIDADE_WORDS = {"fundamental", "medio", "tecnico", "superior", "mestrado", "doutorado", "alfabetizado"}
+# ---------------------------------------------------------------- título
+def extrair_orgao(titulo: str) -> str:
+    """Extrai o nome do órgão/concurso do título da notícia."""
+    t = titulo.strip()
+    # corta a partir de dois-pontos / travessão / exclamação
+    t = re.split(r"[:!|—–]", t)[0].strip()
+    # remove prefixos comuns
+    t = re.sub(r"^(?:concurso p[úu]blico|concursos?|edital|processo seletivo|sele[çc][ãa]o)\s+(?:d[oae]s?\s+)?",
+               "", t, flags=re.I).strip()
+    # corta no primeiro verbo de manchete
+    t = ORGAO_CUT_RE.sub("", t).strip()
+    # remove ano solto no final
+    t = re.sub(r"\s+20\d{2}$", "", t).strip(" -–—,;")
+    return t[:200] or titulo[:200]
 
 
-def _classify_lines(lines):
-    """Recebe as linhas de texto de um bloco de concurso e devolve um dict."""
-    out = {"orgao": None, "uf": None, "vagas": None, "vagas_texto": None,
-           "salario": None, "salario_num": None, "cargos": None,
-           "escolaridade": None, "inscricao_fim": None, "inscricao_inicio": None,
-           "inscricao_texto": None}
-    resto = []
-    for raw in lines:
-        line = " ".join(raw.split())
-        if not line:
-            continue
-        nline = _norm(line)
-        # UF isolada
-        if line.upper() in UFS and len(line) == 2:
-            out["uf"] = line.upper()
-            continue
-        # linha de vagas / salário
-        if re.search(r"\bvagas?\b", nline) or "r$" in nline:
-            mv = re.search(r"([\d\.]+)\s+vagas?", nline)
-            if mv:
-                try:
-                    out["vagas"] = int(mv.group(1).replace(".", ""))
-                except ValueError:
-                    pass
-            ms = re.search(r"r\$\s*([\d\.]+,\d{2})", nline)
-            if ms:
-                out["salario"] = "R$ " + ms.group(1)
-                try:
-                    out["salario_num"] = float(ms.group(1).replace(".", "").replace(",", "."))
-                except ValueError:
-                    pass
-            out["vagas_texto"] = line
-            continue
-        # escolaridade (linha composta apenas por níveis separados por /)
-        parts = [p.strip() for p in nline.split("/") if p.strip()]
-        if parts and all(p in ESCOLARIDADE_WORDS for p in parts):
-            out["escolaridade"] = line
-            continue
-        # datas de inscrição
-        mr = DATE_RANGE_RE.search(line)
-        if mr:
-            d1, m1, y1, d2, m2, y2 = mr.groups()
-            y2i = int(y2)
-            out["inscricao_inicio"] = _iso(int(d1), int(m1), int(y1) if y1 else y2i)
-            out["inscricao_fim"] = _iso(int(d2), int(m2), y2i)
-            out["inscricao_texto"] = line
-            continue
-        md = DATE_RE.search(line)
-        if md and len(nline) <= 40:
-            out["inscricao_fim"] = _iso(int(md.group(1)), int(md.group(2)), int(md.group(3)))
-            out["inscricao_texto"] = line
-            continue
-        resto.append(line)
-    if resto:
-        out["orgao"] = resto[0]
-        if len(resto) > 1:
-            out["cargos"] = " / ".join(resto[1:])[:400]
-    return out
+# nomes de estado COM acento (contra o texto original, para "Pará" não casar com "para")
+NOMES_UF_ACENTO = {
+    "acre": "AC", "alagoas": "AL", "amapá": "AP", "amazonas": "AM", "bahia": "BA",
+    "ceará": "CE", "distrito federal": "DF", "espírito santo": "ES", "goiás": "GO",
+    "maranhão": "MA", "mato grosso do sul": "MS", "mato grosso": "MT",
+    "minas gerais": "MG", "pará": "PA", "paraíba": "PB", "paraná": "PR",
+    "pernambuco": "PE", "piauí": "PI", "rio de janeiro": "RJ",
+    "rio grande do norte": "RN", "rio grande do sul": "RS", "rondônia": "RO",
+    "roraima": "RR", "santa catarina": "SC", "são paulo": "SP", "sergipe": "SE",
+    "tocantins": "TO",
+}
 
 
-def parse_listing(html: str, regiao: str):
-    """Extrai os concursos de uma página de listagem regional."""
+def _uf_por_nome(fonte: str):
+    low = fonte.lower()
+    for nome in sorted(NOMES_UF_ACENTO, key=len, reverse=True):
+        if re.search(r"\b" + re.escape(nome) + r"\b", low):
+            return NOMES_UF_ACENTO[nome]
+    return None
+
+
+def extrair_uf(titulo: str, texto: str):
+    """Tenta achar a UF no título e depois no texto."""
+    # 1) sigla maiúscula no título ("PM PR", "Sefaz-BA", "(SP)")
+    if titulo:
+        for m in re.finditer(r"(?<![A-Za-z])([A-Z]{2})(?![A-Za-z])", titulo):
+            sig = m.group(1)
+            if sig in UFS and sig != "BR":
+                return sig
+        uf = _uf_por_nome(titulo)
+        if uf:
+            return uf
+    # 2) nome do estado (com acento) no começo do texto
+    if texto:
+        uf = _uf_por_nome(texto[:1500])
+        if uf:
+            return uf
+        m = re.search(r"[\(/\-–]\s*([A-Z]{2})\s*[\)]?(?=[\s,.;:!?]|$)", texto[:1500])
+        if m and m.group(1) in UFS and m.group(1) != "BR":
+            return m.group(1)
+    ntudo = _norm((titulo or "") + " " + (texto or "")[:2000])
+    if re.search(r"ambito nacional|todo o (?:brasil|pais)|carater nacional|nivel nacional", ntudo):
+        return "BR"
+    # órgãos federais típicos
+    if re.search(r"\b(inss|ibge|receita federal|policia federal|prf|banco central|bacen|"
+                 r"caixa|banco do brasil|correios|anvisa|ancine|antt|anatel|aneel|"
+                 r"tribunal superior|stf|stj|tst|tse|stm|camara dos deputados|senado|"
+                 r"ministerio d|advocacia[- ]geral da uniao|agu|dpu|mpu|trf|funai|ibama|"
+                 r"icmbio|incra|dataprev|serpro|ebserh|embrapa)\b", ntudo):
+        return "BR"
+    return None
+
+
+# ---------------------------------------------------------------- artigo
+def parse_artigo(html: str, titulo: str):
+    """Extrai os dados do concurso do artigo completo do blog."""
     soup = BeautifulSoup(html, "lxml")
-    seen = set()
-    results = []
-    # blocos candidatos: qualquer container que tenha um link para /noticias/
-    for a in soup.find_all("a", href=re.compile(r"/noticias/")):
-        # sobe na árvore até achar o menor container que pareça uma ficha
-        block, text = None, ""
-        node = a
-        for _ in range(6):
-            node = node.find_parent(["div", "li", "article", "tr", "section"])
-            if node is None:
-                break
-            t = node.get_text("\n", strip=True)
-            if len(t) > 700:  # container grande demais = página inteira
-                break
-            nt = _norm(t)
-            if DATE_RE.search(t) and ("vaga" in nt or "r$" in nt):
-                block, text = node, t
-                break
-        if block is None:
-            continue
-        url = a["href"]
-        if url.startswith("/"):
-            url = BASE + url
-        if url in seen:
-            continue
-        seen.add(url)
-        data = _classify_lines(text.split("\n"))
-        if not data["orgao"]:
-            data["orgao"] = a.get_text(strip=True) or a.get("title") or "Órgão não identificado"
-        if regiao == "Nacional" and not data["uf"]:
-            data["uf"] = "BR"
-        data["regiao"] = regiao_da_uf(data["uf"]) or regiao
-        data["url_fonte"] = url
-        results.append(data)
-    return results
-
-
-# -------------------------------------------------------------- detalhe
-def parse_detail(html: str):
-    """Extrai informações extras da página de notícia do concurso."""
-    soup = BeautifulSoup(html, "lxml")
-    # zona principal do artigo
-    article = soup.find("article") or soup.find("div", id="materia") or soup
+    article = (soup.find("article") or soup.find("div", class_=re.compile(r"post-content|entry-content|single-content|article"))
+               or soup.find("main") or soup)
     text = article.get_text(" ", strip=True)
     out = {}
 
-    # frases
     sentences = re.split(r"(?<=[\.\!\?;])\s+", text)
+
+    # vagas
+    mv = re.search(r"([\d\.]{1,7})\s+vagas", text)
+    if mv:
+        try:
+            v = int(mv.group(1).replace(".", ""))
+            if 0 < v < 200000:
+                out["vagas"] = v
+        except ValueError:
+            pass
+
+    # salário (maior valor R$ citado)
+    valores = []
+    for ms in re.finditer(r"R\$\s*([\d\.]+,\d{2})", text):
+        try:
+            valores.append(float(ms.group(1).replace(".", "").replace(",", ".")))
+        except ValueError:
+            pass
+    if valores:
+        maior = max(valores)
+        if maior >= 500:  # ignora taxas
+            out["salario_num"] = maior
+            out["salario"] = "R$ " + f"{maior:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
     # data da prova
     for s in sentences:
@@ -225,40 +229,39 @@ def parse_detail(html: str):
                 out["prova_texto"] = s.strip()[:300]
                 break
 
-    # período de inscrição (frases com "inscri")
-    if "prova_data" in out or True:
-        for s in sentences:
-            ns = _norm(s)
-            if "inscri" not in ns:
-                continue
-            mr = DATE_RANGE_RE.search(s)
-            if mr:
-                d1, m1, y1, d2, m2, y2 = mr.groups()
-                out["inscricao_inicio"] = _iso(int(d1), int(m1), int(y1) if y1 else int(y2))
-                out["inscricao_fim"] = _iso(int(d2), int(m2), int(y2))
-                break
-            # datas por extenso na frase de inscrição
-            extensos = []
-            for m in EXTENSO_RE.finditer(_norm(s)):
-                mes = MESES.get(m.group(2))
-                if mes:
-                    ano = int(m.group(3)) if m.group(3) else datetime.now().year
-                    d = _iso(int(m.group(1)), mes, ano)
-                    if d:
-                        extensos.append(d)
-            numericas = [_iso(int(a), int(b), int(c)) for a, b, c in DATE_RE.findall(s)]
-            numericas = [d for d in numericas if d]
-            datas = extensos or numericas
-            if len(datas) >= 2:
-                out["inscricao_inicio"], out["inscricao_fim"] = min(datas), max(datas)
-                break
-            if len(datas) == 1 and re.search(r"\bate\b|\bencerr|prorrog", ns):
-                out["inscricao_fim"] = datas[0]
-                break
+    # período de inscrição
+    for s in sentences:
+        ns = _norm(s)
+        if "inscri" not in ns:
+            continue
+        mr = DATE_RANGE_RE.search(s)
+        if mr:
+            d1, m1, y1, d2, m2, y2 = mr.groups()
+            out["inscricao_inicio"] = _iso(int(d1), int(m1), int(y1) if y1 else int(y2))
+            out["inscricao_fim"] = _iso(int(d2), int(m2), int(y2))
+            break
+        extensos = []
+        for m in EXTENSO_RE.finditer(_norm(s)):
+            mes = MESES.get(m.group(2))
+            if mes:
+                ano = int(m.group(3)) if m.group(3) else datetime.now().year
+                d = _iso(int(m.group(1)), mes, ano)
+                if d:
+                    extensos.append(d)
+        numericas = [_iso(int(a), int(b), int(c)) for a, b, c in DATE_RE.findall(s)]
+        numericas = [d for d in numericas if d]
+        datas = extensos or numericas
+        if len(datas) >= 2:
+            out["inscricao_inicio"], out["inscricao_fim"] = min(datas), max(datas)
+            break
+        if len(datas) == 1 and re.search(r"\bate\b|\bencerr|prorrog", ns):
+            out["inscricao_fim"] = datas[0]
+            break
 
     # banca
+    ntext = _norm(text)
     for banca in BANCAS:
-        if re.search(r"\b" + re.escape(_norm(banca)) + r"\b", _norm(text)):
+        if re.search(r"\b" + re.escape(_norm(banca)) + r"\b", ntext):
             out["banca"] = banca
             break
 
@@ -268,13 +271,31 @@ def parse_detail(html: str):
     if mt:
         out["taxa"] = "R$ " + mt.group(1)
 
-    # link de inscrição (primeiro link externo que não é PCI/rede social)
+    # cargos ("para o cargo de X", "cargos de X e Y")
+    mc = re.search(r"cargos? d[eo]s?\s+([^.;!?]{4,120})", text, re.I)
+    if mc:
+        out["cargos"] = mc.group(1).strip().rstrip(",")[:300]
+
+    # escolaridade
+    niveis = []
+    for nivel, pat in [("Fundamental", r"nivel fundamental"), ("Médio", r"nivel medio"),
+                       ("Técnico", r"nivel tecnico"), ("Superior", r"nivel superior")]:
+        if re.search(pat, ntext):
+            niveis.append(nivel)
+    if niveis:
+        out["escolaridade"] = " / ".join(niveis)
+
+    # link de inscrição (primeiro link externo que não é blog/rede social)
     for a in article.find_all("a", href=True):
         href = a["href"]
-        if href.startswith("http") and "pciconcursos" not in href and \
-           not re.search(r"facebook|twitter|whatsapp|instagram|telegram|t\.me|youtube", href):
-            out["url_inscricao"] = href
-            break
+        if href.startswith("http") and not re.search(
+                r"grancursosonline|estrategia|facebook|twitter|whatsapp|instagram|"
+                r"telegram|t\.me|youtube|linkedin|tiktok|google\.com|bit\.ly", href):
+            texto_link = _norm(a.get_text(" ", strip=True))
+            if re.search(r"inscri|edital|site|oficial|banca", texto_link) or \
+               re.search(r"gov\.br|org\.br|\.br/concurso", href):
+                out["url_inscricao"] = href
+                break
 
     # resumo = primeiras ~2 frases
     if sentences:
@@ -284,29 +305,63 @@ def parse_detail(html: str):
     return out
 
 
-# ------------------------------------------------------------------ rss
-RSS_FEEDS = [
-    ("Gran Cursos", "https://blog.grancursosonline.com.br/feed/"),
-    ("Estratégia", "https://www.estrategiaconcursos.com.br/blog/feed/"),
-]
-RSS_KEYWORDS = re.compile(r"concurso|edital|inscri|vaga|prova|banca|resultado|gabarito", re.I)
+def montar_concurso(fonte: str, titulo: str, link: str, art: dict) -> dict:
+    """Monta o dict de concurso a partir do artigo parseado."""
+    texto = art.get("_texto", "")
+    orgao = extrair_orgao(titulo)
+    uf = extrair_uf(titulo, texto)
+    data = {k: v for k, v in art.items() if not k.startswith("_")}
+    data.update({
+        "url_fonte": link,
+        "orgao": orgao,
+        "uf": uf,
+        "regiao": regiao_da_uf(uf),
+        "materias": detectar_materias(texto, titulo, art.get("cargos")),
+        "etapas": detectar_etapas(texto, titulo),
+        "origem": "scraper",
+        "detalhado": 1,
+    })
+    return data
 
 
-def collect_rss(session: requests.Session) -> dict:
-    """Coleta notícias de editais dos feeds do Gran e do Estratégia."""
-    added = errors = 0
+def eh_noticia_de_concurso(titulo: str) -> bool:
+    nt = _norm(titulo)
+    return bool(TITULO_CONCURSO_RE.search(nt)) and not TITULO_RUIDO_RE.search(nt)
+
+
+def vale_criar_concurso(art: dict, titulo: str) -> bool:
+    """Só cria o card se o artigo tem cara de edital/concurso concreto."""
+    nt = _norm(titulo)
+    tem_dado = any(art.get(k) for k in ("vagas", "inscricao_fim", "prova_data", "banca"))
+    tem_gatilho = bool(re.search(r"edital|inscric|concurso", nt))
+    return tem_dado and tem_gatilho
+
+
+# ----------------------------------------------------------------- run
+def run_scrape(max_articles: int = 60, delay: float = 1.0) -> dict:
+    """Executa a coleta completa. Retorna resumo p/ log."""
+    started = dbm.now_iso()
+    found = created = updated = errors = enriched = 0
+    detail_msgs = []
+    session = requests.Session()
+
+    with dbm.get_db() as db:
+        db.execute("INSERT INTO scrape_logs (started_at, detail) VALUES (?, ?)",
+                   (started, "em andamento"))
+        log_id = db.execute("SELECT last_insert_rowid() AS i").fetchone()["i"]
+
+    novos = []  # (fonte, titulo, link)
     for fonte, url in RSS_FEEDS:
         try:
             r = session.get(url, headers=HEADERS, timeout=30)
             r.raise_for_status()
             feed = feedparser.parse(r.content)
+            qtd = 0
             with dbm.get_db() as db:
-                for entry in feed.entries[:40]:
+                for entry in feed.entries[:60]:
                     titulo = (entry.get("title") or "").strip()
                     link = (entry.get("link") or "").strip()
-                    if not titulo or not link:
-                        continue
-                    if not RSS_KEYWORDS.search(titulo):
+                    if not titulo or not link or not eh_noticia_de_concurso(titulo):
                         continue
                     pub = None
                     if entry.get("published_parsed"):
@@ -314,119 +369,61 @@ def collect_rss(session: requests.Session) -> dict:
                     resumo = BeautifulSoup(entry.get("summary", ""), "lxml").get_text(" ", strip=True)[:400]
                     if dbm.upsert_noticia(db, url=link, titulo=titulo, fonte=fonte,
                                           publicado_em=pub, resumo=resumo):
-                        added += 1
+                        novos.append((fonte, titulo, link))
+                        qtd += 1
+            detail_msgs.append(f"{fonte}: {qtd} notícias novas")
         except Exception as e:
             errors += 1
+            detail_msgs.append(f"{fonte}: ERRO RSS {e}")
             log.warning("RSS %s falhou: %s", fonte, e)
-    return {"added": added, "errors": errors}
 
+    found = len(novos)
 
-# ----------------------------------------------------------------- run
-def run_scrape(max_details: int = 80, delay: float = 1.0) -> dict:
-    """Executa a coleta completa. Retorna resumo p/ log."""
-    started = dbm.now_iso()
-    found = created = updated = errors = 0
-    detail_msgs = []
-    session = requests.Session()
-
-    with dbm.get_db() as db:
-        db.execute(
-            "INSERT INTO scrape_logs (started_at, detail) VALUES (?, ?)",
-            (started, "em andamento"),
-        )
-        log_id = db.execute("SELECT last_insert_rowid() AS i").fetchone()["i"]
-
-    listings = []
-    for regiao, slugs in REGIOES_SLUGS.items():
-        ok = False
-        for slug in slugs:
-            url = f"{BASE}/concursos/{slug}/"
-            try:
-                html = fetch(url, session)
-                items = parse_listing(html, regiao)
-                listings.extend(items)
-                detail_msgs.append(f"{regiao}: {len(items)} concursos")
-                ok = True
-                break
-            except Exception as e:  # tenta próximo slug
-                last_err = e
-        if not ok:
-            errors += 1
-            detail_msgs.append(f"{regiao}: ERRO {last_err}")
-            log.warning("Falha na região %s: %s", regiao, last_err)
-        time.sleep(delay)
-
-    found = len(listings)
-
-    with dbm.get_db() as db:
-        for item in listings:
-            item.setdefault("materias", detectar_materias(item.get("cargos"), item.get("orgao")))
-            try:
-                res = dbm.upsert_concurso(db, item)
+    # baixa o artigo completo de cada notícia nova e tenta montar o concurso
+    for fonte, titulo, link in novos[:max_articles]:
+        try:
+            html = fetch(link, session)
+            art = parse_artigo(html, titulo)
+            if vale_criar_concurso(art, titulo):
+                data = montar_concurso(fonte, titulo, link, art)
+                with dbm.get_db() as db:
+                    res = dbm.upsert_concurso(db, data)
                 created += res == "created"
                 updated += res == "updated"
-            except Exception as e:
-                errors += 1
-                log.warning("Upsert falhou p/ %s: %s", item.get("url_fonte"), e)
-
-        # detalhes pendentes (novos primeiro)
-        pend = db.execute(
-            "SELECT id, url_fonte, cargos, orgao FROM concursos "
-            "WHERE detalhado=0 AND status='aberto' AND url_fonte IS NOT NULL "
-            "ORDER BY id DESC LIMIT ?", (max_details,),
-        ).fetchall()
-
-    enriched = 0
-    for row in pend:
-        try:
-            html = fetch(row["url_fonte"], session)
-            det = parse_detail(html)
-            texto = det.pop("_texto", "")
-            det["materias"] = detectar_materias(texto, row["cargos"], row["orgao"])
-            det["detalhado"] = 1
-            det["url_fonte"] = row["url_fonte"]
-            with dbm.get_db() as db:
-                sets, vals = [], []
-                for k, v in det.items():
-                    if k == "url_fonte" or v in (None, ""):
-                        continue
-                    if k == "materias":
-                        import json as _json
-                        old = db.execute("SELECT materias FROM concursos WHERE id=?", (row["id"],)).fetchone()
-                        merged = sorted(set(_json.loads(old["materias"] or "[]")) | set(v))
-                        v = _json.dumps(merged, ensure_ascii=False)
-                    sets.append(f"{k}=?")
-                    vals.append(v)
-                sets.append("detalhado=1")
-                sets.append("updated_at=?")
-                vals.append(dbm.now_iso())
-                db.execute(f"UPDATE concursos SET {', '.join(sets)} WHERE id=?", vals + [row["id"]])
-            enriched += 1
+                enriched += 1
         except Exception as e:
             errors += 1
-            log.warning("Detalhe falhou p/ %s: %s", row["url_fonte"], e)
+            log.warning("Artigo falhou p/ %s: %s", link, e)
         time.sleep(delay)
+    if found > max_articles:
+        detail_msgs.append(f"limite de artigos por coleta: {max_articles} (ficaram {found - max_articles})")
 
-    # re-detecção de matérias nos abertos (aplica padrões novos ao que já existe)
+    # re-detecção de matérias/fases nos abertos (aplica padrões novos ao acervo)
     import json as _json
     with dbm.get_db() as db:
-        for r in db.execute("SELECT id, orgao, cargos, resumo, materias FROM concursos WHERE status='aberto'").fetchall():
-            novas = set(detectar_materias(r["orgao"], r["cargos"], r["resumo"]))
-            atuais = set(_json.loads(r["materias"] or "[]"))
-            if novas - atuais:
-                db.execute("UPDATE concursos SET materias=?, updated_at=? WHERE id=?",
-                           (_json.dumps(sorted(atuais | novas), ensure_ascii=False), dbm.now_iso(), r["id"]))
-
-    rss = collect_rss(session)
-    errors += rss["errors"]
-    detail_msgs.append(f"RSS: {rss['added']} notícias novas")
+        for r in db.execute("SELECT id, orgao, cargos, resumo, materias, etapas FROM concursos WHERE status='aberto'").fetchall():
+            novas_m = set(detectar_materias(r["orgao"], r["cargos"], r["resumo"]))
+            atuais_m = set(_json.loads(r["materias"] or "[]"))
+            novas_e = set(detectar_etapas(r["orgao"], r["cargos"], r["resumo"]))
+            atuais_e = set(_json.loads(r["etapas"] or "[]"))
+            if (novas_m - atuais_m) or (novas_e - atuais_e):
+                db.execute("UPDATE concursos SET materias=?, etapas=?, updated_at=? WHERE id=?",
+                           (_json.dumps(sorted(atuais_m | novas_m), ensure_ascii=False),
+                            _json.dumps(sorted(atuais_e | novas_e), ensure_ascii=False),
+                            dbm.now_iso(), r["id"]))
 
     with dbm.get_db() as db:
+        dedup = dbm.dedupe_open(db)
+        if dedup:
+            detail_msgs.append(f"duplicatas removidas: {dedup}")
         closed = dbm.close_expired(db)
+        purged = dbm.purge_old(db)
+        if purged:
+            detail_msgs.append(f"antigos removidos (>90d): {purged}")
         db.execute(
             "UPDATE scrape_logs SET finished_at=?, found=?, created=?, updated=?, closed=?, errors=?, detail=? WHERE id=?",
             (dbm.now_iso(), found, created, updated, closed, errors,
-             "; ".join(detail_msgs) + f"; detalhes enriquecidos: {enriched}", log_id),
+             "; ".join(detail_msgs) + f"; artigos processados: {enriched}", log_id),
         )
 
     summary = {"found": found, "created": created, "updated": updated,

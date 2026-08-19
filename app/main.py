@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from . import auth, db as dbm, scraper
-from .materias import MATERIAS_PATTERNS, REGIOES, UFS, regiao_da_uf
+from .materias import ETAPAS, MATERIAS_PATTERNS, REGIOES, UFS, regiao_da_uf
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 log = logging.getLogger("app")
@@ -201,25 +201,27 @@ def dashboard(request: Request):
     # lista completa do dicionário + o que existir na base (edições manuais)
     materias = sorted(set(materias) | set(MATERIAS_PATTERNS.keys()))
     return templates.TemplateResponse("dashboard.html", {
-        "request": request, "user": user, "materias": materias,
+        "request": request, "user": user, "materias": materias, "etapas": ETAPAS,
         "ufs": {k: v[0] for k, v in UFS.items()}, "regioes": REGIOES, "stats": st,
         "noticias": noticias,
     })
 
 
 @app.get("/api/concursos")
-def api_concursos(request: Request, q: str = None, materia: str = None, uf: str = None,
-                  regiao: str = None, inscricao_ate: str = None, prova_de: str = None,
-                  prova_ate: str = None, status: str = "aberto", order: str = "inscricao_fim"):
+def api_concursos(request: Request, q: str = None, materia: str = None, etapa: str = None,
+                  uf: str = None, regiao: str = None, inscricao_ate: str = None,
+                  prova_de: str = None, prova_ate: str = None, status: str = "aberto",
+                  fase: str = None, order: str = "inscricao_fim"):
     user = current_user(request)
     if not user:
         return JSONResponse({"error": "não autenticado"}, status_code=401)
     materias = [m for m in (materia.split("|") if materia else []) if m]
+    etapas = [e for e in (etapa.split("|") if etapa else []) if e]
     with dbm.get_db() as db:
-        rows = dbm.query_concursos(db, q=q, materias=materias, uf=uf or None,
+        rows = dbm.query_concursos(db, q=q, materias=materias, etapas=etapas, uf=uf or None,
                                    regiao=regiao or None, inscricao_ate=inscricao_ate or None,
                                    prova_de=prova_de or None, prova_ate=prova_ate or None,
-                                   status=status, order=order)
+                                   status=status, fase=fase or None, order=order)
         st = dbm.stats(db)
     return {"concursos": rows, "stats": st, "count": len(rows)}
 
@@ -254,6 +256,7 @@ def admin_page(request: Request):
         "scrapes": scrapes, "manuais": manuais, "stats": st,
         "scrape_running": _scrape_running["flag"],
         "materias_all": sorted(MATERIAS_PATTERNS.keys()),
+        "etapas_all": ETAPAS,
         "ufs": {k: v[0] for k, v in UFS.items()},
         "open_registration": OPEN_REGISTRATION,
     })
@@ -297,18 +300,19 @@ def admin_add_concurso(request: Request, orgao: str = Form(...), uf: str = Form(
                        vagas: str = Form(""), salario: str = Form(""), cargos: str = Form(""),
                        inscricao_fim: str = Form(""), prova_data: str = Form(""),
                        banca: str = Form(""), url_inscricao: str = Form(""),
-                       materias: str = Form(""), resumo: str = Form("")):
+                       materias: str = Form(""), etapas: str = Form(""), resumo: str = Form("")):
     user, redir = require_admin(request)
     if redir:
         return redir
     mats = [m.strip() for m in materias.split(",") if m.strip()]
+    etps = [e.strip() for e in etapas.split(",") if e.strip()]
     data = {
         "orgao": orgao.strip(), "uf": uf.upper() or None, "regiao": regiao_da_uf(uf),
         "vagas": int(vagas) if vagas.strip().isdigit() else None,
         "salario": salario.strip() or None, "cargos": cargos.strip() or None,
         "inscricao_fim": inscricao_fim or None, "prova_data": prova_data or None,
         "banca": banca.strip() or None, "url_inscricao": url_inscricao.strip() or None,
-        "materias": mats, "resumo": resumo.strip() or None,
+        "materias": mats, "etapas": etps, "resumo": resumo.strip() or None,
         "origem": "manual", "detalhado": 1, "status": "aberto",
         "url_fonte": f"manual:{orgao.strip()}:{inscricao_fim or ''}",
     }

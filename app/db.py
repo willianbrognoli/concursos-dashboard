@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS concursos (
     banca TEXT,
     taxa TEXT,
     materias TEXT NOT NULL DEFAULT '[]',  -- JSON list
+    etapas TEXT NOT NULL DEFAULT '[]',    -- JSON list (fases do certame)
     resumo TEXT,
     url_inscricao TEXT,
     status TEXT NOT NULL DEFAULT 'aberto', -- aberto | encerrado
@@ -119,6 +120,10 @@ def get_db():
 def init_db():
     with get_db() as db:
         db.executescript(SCHEMA)
+        # migração: bancos criados antes da v2.0 não têm a coluna etapas
+        cols = [r["name"] for r in db.execute("PRAGMA table_info(concursos)").fetchall()]
+        if "etapas" not in cols:
+            db.execute("ALTER TABLE concursos ADD COLUMN etapas TEXT NOT NULL DEFAULT '[]'")
 
 
 # ---------------------------------------------------------------- users
@@ -173,19 +178,30 @@ CONCURSO_FIELDS = [
     "url_fonte", "orgao", "uf", "regiao", "vagas", "vagas_texto", "salario",
     "salario_num", "cargos", "escolaridade", "inscricao_inicio", "inscricao_fim",
     "inscricao_texto", "prova_data", "prova_texto", "banca", "taxa", "materias",
-    "resumo", "url_inscricao", "status", "origem", "detalhado",
+    "etapas", "resumo", "url_inscricao", "status", "origem", "detalhado",
 ]
+
+_JSON_LIST_FIELDS = ("materias", "etapas")
 
 
 def upsert_concurso(db, data: dict) -> str:
     """Insere ou atualiza pelo url_fonte. Retorna 'created' ou 'updated'."""
     data = dict(data)
-    if isinstance(data.get("materias"), (list, tuple)):
-        data["materias"] = json.dumps(sorted(set(data["materias"])), ensure_ascii=False)
+    for jf in _JSON_LIST_FIELDS:
+        if isinstance(data.get(jf), (list, tuple)):
+            data[jf] = json.dumps(sorted(set(data[jf])), ensure_ascii=False)
     existing = None
     if data.get("url_fonte"):
         existing = db.execute(
             "SELECT * FROM concursos WHERE url_fonte = ?", (data["url_fonte"],)
+        ).fetchone()
+    # anti-duplicata: mesmo órgão+UF ainda aberto = mesmo concurso, mesmo que o
+    # PCI tenha publicado uma notícia nova (retificação/prorrogação) com outra URL
+    if existing is None and data.get("orgao"):
+        existing = db.execute(
+            "SELECT * FROM concursos WHERE status='aberto' "
+            "AND lower(trim(orgao)) = lower(trim(?)) AND COALESCE(uf,'') = COALESCE(?, '')",
+            (data["orgao"], data.get("uf")),
         ).fetchone()
     ts = now_iso()
     if existing:
@@ -193,8 +209,11 @@ def upsert_concurso(db, data: dict) -> str:
         merged = {}
         for f in CONCURSO_FIELDS:
             new_val = data.get(f)
-            if f == "materias":
-                old = json.loads(existing["materias"] or "[]")
+            if f in _JSON_LIST_FIELDS:
+                try:
+                    old = json.loads(existing[f] or "[]")
+                except (KeyError, IndexError, TypeError, ValueError):
+                    old = []
                 new = json.loads(new_val) if new_val else []
                 merged[f] = json.dumps(sorted(set(old) | set(new)), ensure_ascii=False)
             elif new_val not in (None, "", []):
@@ -211,6 +230,7 @@ def upsert_concurso(db, data: dict) -> str:
         for f in CONCURSO_FIELDS:
             data.setdefault(f, None)
         data["materias"] = data.get("materias") or "[]"
+        data["etapas"] = data.get("etapas") or "[]"
         data["status"] = data.get("status") or "aberto"
         data["origem"] = data.get("origem") or "scraper"
         data["detalhado"] = data.get("detalhado") or 0
@@ -221,6 +241,47 @@ def upsert_concurso(db, data: dict) -> str:
             [data[f] for f in CONCURSO_FIELDS] + [ts, ts],
         )
         return "created"
+
+
+def purge_old(db, days: int = 90) -> int:
+    """Remove concursos muito antigos (prova realizada ou inscrição encerrada há mais de N dias)."""
+    from datetime import timedelta
+    cutoff = (datetime.now().date() - timedelta(days=days)).isoformat()
+    cur = db.execute(
+        "DELETE FROM concursos WHERE origem != 'manual' AND ("
+        " (prova_data IS NOT NULL AND prova_data < ?) OR"
+        " (prova_data IS NULL AND inscricao_fim IS NOT NULL AND inscricao_fim < ?))",
+        (cutoff, cutoff),
+    )
+    return cur.rowcount
+
+
+def dedupe_open(db) -> int:
+    """Remove duplicatas abertas (mesmo órgão+UF), mantendo a mais completa/recente.
+    Mescla as matérias antes de excluir."""
+    rows = db.execute(
+        "SELECT id, orgao, uf, materias, etapas, detalhado, updated_at FROM concursos "
+        "WHERE status='aberto' ORDER BY detalhado DESC, updated_at DESC, id DESC"
+    ).fetchall()
+    seen: dict = {}
+    removed = 0
+    for r in rows:
+        key = ((r["orgao"] or "").strip().lower(), (r["uf"] or "").strip().upper())
+        if key in seen:
+            keeper = seen[key]
+            keeper["materias"] |= set(json.loads(r["materias"] or "[]"))
+            keeper["etapas"] |= set(json.loads(r["etapas"] or "[]"))
+            db.execute("UPDATE concursos SET materias=?, etapas=?, updated_at=? WHERE id=?",
+                       (json.dumps(sorted(keeper["materias"]), ensure_ascii=False),
+                        json.dumps(sorted(keeper["etapas"]), ensure_ascii=False),
+                        now_iso(), keeper["id"]))
+            db.execute("DELETE FROM concursos WHERE id=?", (r["id"],))
+            removed += 1
+        else:
+            seen[key] = {"id": r["id"],
+                         "materias": set(json.loads(r["materias"] or "[]")),
+                         "etapas": set(json.loads(r["etapas"] or "[]"))}
+    return removed
 
 
 def close_expired(db) -> int:
@@ -234,12 +295,25 @@ def close_expired(db) -> int:
     return cur.rowcount
 
 
-def query_concursos(db, *, q=None, materias=None, uf=None, regiao=None,
+def query_concursos(db, *, q=None, materias=None, etapas=None, uf=None, regiao=None,
                     inscricao_ate=None, prova_de=None, prova_ate=None,
-                    status="aberto", order="inscricao_fim", limit=500):
+                    status="aberto", fase=None, order="inscricao_fim", limit=500):
     sql = "SELECT * FROM concursos WHERE 1=1"
     params: list = []
-    if status and status != "todos":
+    today = datetime.now().date().isoformat()
+    if fase:
+        # fase deriva das datas e tem prioridade sobre status
+        if fase == "abertas":
+            sql += " AND status = 'aberto'"
+        elif fase == "aguardando_prova":
+            sql += (" AND inscricao_fim IS NOT NULL AND inscricao_fim < ?"
+                    " AND (prova_data IS NULL OR prova_data >= ?)")
+            params += [today, today]
+        elif fase == "prova_realizada":
+            sql += " AND prova_data IS NOT NULL AND prova_data < ?"
+            params.append(today)
+        # fase == 'todas' -> sem condição
+    elif status and status != "todos":
         sql += " AND status = ?"
         params.append(status)
     if q:
@@ -265,6 +339,10 @@ def query_concursos(db, *, q=None, materias=None, uf=None, regiao=None,
         for m in materias:
             sql += " AND materias LIKE ?"
             params.append(f'%"{m}"%')
+    if etapas:
+        for e in etapas:
+            sql += " AND etapas LIKE ?"
+            params.append(f'%"{e}"%')
     orders = {
         "inscricao_fim": "CASE WHEN inscricao_fim IS NULL THEN 1 ELSE 0 END, inscricao_fim ASC",
         "prova_data": "CASE WHEN prova_data IS NULL THEN 1 ELSE 0 END, prova_data ASC",
@@ -281,10 +359,11 @@ def query_concursos(db, *, q=None, materias=None, uf=None, regiao=None,
 
 def row_to_dict(r: sqlite3.Row) -> dict:
     d = dict(r)
-    try:
-        d["materias"] = json.loads(d.get("materias") or "[]")
-    except Exception:
-        d["materias"] = []
+    for jf in _JSON_LIST_FIELDS:
+        try:
+            d[jf] = json.loads(d.get(jf) or "[]")
+        except Exception:
+            d[jf] = []
     return d
 
 

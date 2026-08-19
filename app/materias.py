@@ -20,6 +20,18 @@ UFS = {
 
 REGIOES = ["Norte", "Nordeste", "Centro-Oeste", "Sudeste", "Sul", "Nacional"]
 
+# nome do estado (normalizado, sem acento, minúsculo) -> UF
+NOMES_UF = {
+    "acre": "AC", "alagoas": "AL", "amapa": "AP", "amazonas": "AM", "bahia": "BA",
+    "ceara": "CE", "distrito federal": "DF", "espirito santo": "ES", "goias": "GO",
+    "maranhao": "MA", "mato grosso do sul": "MS", "mato grosso": "MT",
+    "minas gerais": "MG", "para": "PA", "paraiba": "PB", "parana": "PR",
+    "pernambuco": "PE", "piaui": "PI", "rio de janeiro": "RJ",
+    "rio grande do norte": "RN", "rio grande do sul": "RS", "rondonia": "RO",
+    "roraima": "RR", "santa catarina": "SC", "sao paulo": "SP", "sergipe": "SE",
+    "tocantins": "TO",
+}
+
 
 def _norm(s: str) -> str:
     s = unicodedata.normalize("NFD", s or "")
@@ -64,9 +76,9 @@ MATERIAS_PATTERNS = {
     "Tecnologia da Informação": [r"tecnologia da informacao", r"analista de sistemas", r"desenvolvimento de sistemas", r"\bti\b(?![a-z])", r"engenheir[oa] de software"],
     "Saúde Pública / SUS": [r"\bsus\b", r"saude publica", r"saude coletiva", r"sistema unico de saude"],
     "Enfermagem": [r"\benfermeir[oa]\b", r"\benfermagem\b"],
-    "Medicina": [r"\bmedic[oa]\b(?! veterinari)", r"\bmedicina\b"],
+    "Medicina": [r"(?<!exame )(?<!junta )(?<!pericia )(?<!avaliacao )(?<!inspecao )\bmedic[oa]s?\b(?! veterinari)", r"\bmedicina\b(?! veterinaria)"],
     "Odontologia": [r"\bodontolog", r"\bdentista\b", r"cirurgiao[- ]dentista"],
-    "Psicologia": [r"\bpsicolog"],
+    "Psicologia": [r"\bpsicolog[oa]s?\b", r"\bpsicologia\b"],
     "Farmácia": [r"\bfarmac"],
     "Fisioterapia": [r"\bfisioterap"],
     "Nutrição": [r"\bnutricao\b", r"\bnutricionista\b"],
@@ -85,7 +97,7 @@ MATERIAS_PATTERNS = {
     "Fonoaudiologia": [r"\bfonoaudiolog"],
     "Biologia / Biomedicina": [r"\bbiolog[oi]", r"\bbiomedic"],
     "Química": [r"\bquimic[oa]\b(?! industrial)"],
-    "Física": [r"\bfisic[oa]\b(?!terap)"],
+    "Física": [r"(professor|licenciad[oa]|licenciatura|bacharel|graduacao) (de|em) fisica", r"(?<!teste )(?<!condicionamento )(?<!preparo )(?<!esforco )\bfisicos?\b(?!terap)"],
     "Geografia": [r"\bgeograf"],
     "História": [r"\bhistoria\b(?! do)", r"\bhistoriador"],
     "Sociologia / Filosofia": [r"\bsociolog", r"\bfilosof"],
@@ -104,6 +116,71 @@ def detectar_materias(*textos) -> list:
         if any(p.search(texto) for p in pats):
             found.append(materia)
     return sorted(found)
+
+
+# ---------------------------------------------------------------- fases
+# fase do certame -> padrões (regex sobre texto normalizado sem acento),
+# incluindo os sinônimos usuais dos editais/notícias
+ETAPAS_PATTERNS = {
+    "Prova objetiva": [
+        r"provas? objetivas?", r"prova de multipla escolha", r"questoes objetivas",
+        r"prova preambular", r"avaliacao objetiva",
+    ],
+    "Prova discursiva": [
+        r"provas? discursivas?", r"prova dissertativa", r"prova de redacao",
+        r"\bredacao\b", r"prova escrita discursiva", r"questoes discursivas",
+        r"peca (processual|profissional|pratico-profissional)", r"prova subjetiva",
+    ],
+    "Exames biométricos / avaliação médica": [
+        r"exames? toxicologic", r"avaliacao medica", r"exames? medic",
+        r"junta medica", r"pericia medica", r"exame de saude", r"inspecao de saude",
+        r"exames? laborator", r"exames? biometric", r"avaliacao biopsicossocial",
+        r"exames? de sanidade",
+    ],
+    "Prova prática (digitação etc.)": [
+        r"provas? praticas?", r"teste pratico", r"prova de digitacao",
+        r"teste de digitacao", r"\bdigitacao\b", r"prova pratica de direcao",
+        r"prova de conducao veicular",
+    ],
+    "Prova de capacidade física (TAF)": [
+        r"\btaf\b", r"teste de aptidao fisica", r"prova de aptidao fisica",
+        r"exame de aptidao fisica", r"capacidade fisica", r"teste fisico",
+        r"prova fisica", r"avaliacao fisica", r"teste de condicionamento fisico",
+        r"exame de capacitacao fisica",
+    ],
+    "Avaliação psicológica": [
+        r"avaliacao psicologica", r"exame psicotecnico", r"\bpsicotecnico\b",
+        r"teste psicologico", r"exame psicologico", r"avaliacao psiquica",
+        r"exame de aptidao mental",
+    ],
+    "Sindicância de vida pregressa / investigação social": [
+        r"investigacao social", r"vida pregressa", r"\bsindicancia\b",
+        r"investigacao de conduta", r"pesquisa social", r"investigacao criminal e social",
+    ],
+    "Avaliação de títulos": [
+        r"avaliacao de titulos", r"prova de titulos", r"analise de titulos",
+        r"exame de titulos", r"julgamento de titulos", r"avaliacao curricular",
+        r"analise curricular", r"prova de experiencia",
+    ],
+    "Exame admissional": [
+        r"exames? admissiona", r"exames? pre[- ]admissiona",
+    ],
+    "Heteroidentificação": [
+        r"heteroidentificacao", r"analise fenotipica", r"\bfenotipic",
+        r"banca de verificacao", r"verificacao da autodeclaracao",
+        r"afericao da autodeclaracao", r"confirmacao da autodeclaracao",
+        r"procedimento de verificacao racial", r"comissao de verificacao",
+    ],
+}
+
+ETAPAS = list(ETAPAS_PATTERNS.keys())
+_ETAPAS_COMPILED = {e: [re.compile(p) for p in pats] for e, pats in ETAPAS_PATTERNS.items()}
+
+
+def detectar_etapas(*textos) -> list:
+    """Detecta as fases do certame citadas no texto da notícia/edital."""
+    texto = _norm(" \n ".join(t for t in textos if t))
+    return [e for e, pats in _ETAPAS_COMPILED.items() if any(p.search(texto) for p in pats)]
 
 
 def regiao_da_uf(uf: str) -> str:
