@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Criar conta — Dashboard de Oportunidades{% endblock %}
+{% block body %}
+<div class="auth-wrap">
+  <div class="auth-card">
+    <div class="auth-brand">
+      <div class="auth-logo">🎯</div>
+      <h1>Criar <span>conta</span></h1>
+      <p class="auth-sub">Acompanhe concursos abertos, prazos e datas de prova</p>
+    </div>
+    {% if error %}<div class="alert">{{ error }}</div>{% endif %}
+    <form method="post" action="/register">
+      <label>Nome
+        <input type="text" name="name" required autofocus autocomplete="name">
+      </label>
+      <label>E-mail
+        <input type="email" name="email" required autocomplete="email">
+      </label>
+      <label>Senha <small>(mínimo 8 caracteres)</small>
+        <input type="password" name="password" required minlength="8" autocomplete="new-password">
+      </label>
+      <label>Confirmar senha
+        <input type="password" name="password2" required minlength="8" autocomplete="new-password">
+      </label>
+      <button type="submit" class="btn-gold">Cadastrar</button>
+    </form>
+    <p class="auth-alt">Já tem conta? <a href="/login">Entrar</a></p>
+  </div>
+</div>
+{% endblock %}
