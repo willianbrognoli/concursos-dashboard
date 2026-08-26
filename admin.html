@@ -1,0 +1,147 @@
+{% extends "base.html" %}
+{% block title %}Admin — Dashboard de Oportunidades{% endblock %}
+{% block body %}
+<header class="topbar">
+  <div class="topbar-inner">
+    <div class="brand">🎯 Painel <span>Admin</span></div>
+    <nav class="topnav">
+      <a href="/" class="nav-link">← Dashboard</a>
+      <a href="/logout" class="nav-link">Sair</a>
+    </nav>
+  </div>
+</header>
+
+<main class="admin-wrap">
+  {% if request.query_params.get('msg') %}
+  <div class="alert ok">{{ request.query_params.get('msg') }}</div>
+  {% endif %}
+
+  <div class="stats">
+    <div class="stat"><div class="stat-num">{{ stats.total }}</div><div class="stat-label">concursos abertos</div></div>
+    <div class="stat"><div class="stat-num">{{ '{:,}'.format(stats.vagas).replace(',', '.') }}</div><div class="stat-label">vagas</div></div>
+    <div class="stat"><div class="stat-num">{{ users|length }}</div><div class="stat-label">usuários</div></div>
+    <div class="stat">
+      <form method="post" action="/admin/scrape">
+        <button class="btn-gold" {% if scrape_running %}disabled{% endif %}>
+          {% if scrape_running %}Coleta em andamento…{% else %}▶ Coletar agora{% endif %}
+        </button>
+      </form>
+      <div class="stat-label">{{ 'última: ' + stats.ultima_coleta[:16].replace('T',' ') + ' UTC' if stats.ultima_coleta else 'nenhuma coleta ainda' }}</div>
+    </div>
+  </div>
+
+  <details class="panel" open>
+    <summary>Usuários ({{ users|length }})</summary>
+    <table>
+      <thead><tr><th>Nome</th><th>E-mail</th><th>Criado em</th><th>Admin</th><th>Ativo</th><th></th></tr></thead>
+      <tbody>
+      {% for u in users %}
+        <tr>
+          <td>{{ u.name }}</td><td>{{ u.email }}</td><td>{{ u.created_at[:10] }}</td>
+          <td>{{ '✔' if u.is_admin else '—' }}</td>
+          <td>{{ 'sim' if u.is_active else 'bloqueado' }}</td>
+          <td class="row-actions">
+            {% if u.id != user.id %}
+            <form method="post" action="/admin/user/{{ u.id }}/toggle-admin"><button class="btn-mini">{{ 'remover admin' if u.is_admin else 'tornar admin' }}</button></form>
+            <form method="post" action="/admin/user/{{ u.id }}/toggle-active"><button class="btn-mini">{{ 'bloquear' if u.is_active else 'desbloquear' }}</button></form>
+            {% else %}<em>você</em>{% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </details>
+
+  <details class="panel">
+    <summary>Registro de acessos (últimos 200)</summary>
+    <table>
+      <thead><tr><th>Quando (UTC)</th><th>Usuário</th><th>E-mail</th><th>Evento</th><th>Resultado</th><th>IP</th></tr></thead>
+      <tbody>
+      {% for l in logs %}
+        <tr class="{{ '' if l.success else 'fail' }}">
+          <td>{{ l.created_at[:19].replace('T',' ') }}</td>
+          <td>{{ l.user_name or '—' }}</td>
+          <td>{{ l.email or '—' }}</td>
+          <td>{{ l.kind }}</td>
+          <td>{{ 'ok' if l.success else 'FALHA' }}</td>
+          <td>{{ l.ip or '—' }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </details>
+
+  <details class="panel">
+    <summary>Coletas do scraper (últimas 30)</summary>
+    <table>
+      <thead><tr><th>Início (UTC)</th><th>Fim</th><th>Achados</th><th>Novos</th><th>Atualizados</th><th>Encerrados</th><th>Erros</th><th>Detalhe</th></tr></thead>
+      <tbody>
+      {% for s in scrapes %}
+        <tr>
+          <td>{{ s.started_at[:19].replace('T',' ') }}</td>
+          <td>{{ s.finished_at[:19].replace('T',' ') if s.finished_at else 'em andamento' }}</td>
+          <td>{{ s.found }}</td><td>{{ s.created }}</td><td>{{ s.updated }}</td>
+          <td>{{ s.closed }}</td><td>{{ s.errors }}</td>
+          <td class="detail-cell">{{ s.detail or '' }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </details>
+
+  <details class="panel" id="concursos">
+    <summary>Adicionar concurso manualmente</summary>
+    <form method="post" action="/admin/concurso" class="grid-form">
+      <label>Órgão *<input name="orgao" required></label>
+      <label>UF
+        <select name="uf"><option value="">—</option>
+          {% for sigla, nome in ufs.items() %}<option value="{{ sigla }}">{{ sigla }} — {{ nome }}</option>{% endfor %}
+        </select>
+      </label>
+      <label>Vagas<input name="vagas" type="number" min="0"></label>
+      <label>Salário<input name="salario" placeholder="R$ 5.000,00"></label>
+      <label>Cargos<input name="cargos"></label>
+      <label>Fim das inscrições<input name="inscricao_fim" type="date"></label>
+      <label>Data da prova<input name="prova_data" type="date"></label>
+      <label>Banca<input name="banca"></label>
+      <label>Status do edital
+        <select name="edital_status"><option value="">automático (pelas datas)</option>
+          {% for s in status_edital_all %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
+        </select>
+      </label>
+      <label>Link de inscrição<input name="url_inscricao" type="url"></label>
+      <label class="span2">Matérias (separadas por vírgula)
+        <input name="materias" placeholder="Direito Constitucional, Língua Portuguesa">
+        <small>Sugestões: {{ materias_all[:12]|join(', ') }}…</small>
+      </label>
+      <label class="span2">Fases do certame (separadas por vírgula)
+        <input name="etapas" placeholder="Prova objetiva, Heteroidentificação">
+        <small>Opções: {{ etapas_all|join(', ') }}</small>
+      </label>
+      <label class="span2">Resumo<textarea name="resumo" rows="2"></textarea></label>
+      <button class="btn-gold span2">Salvar concurso</button>
+    </form>
+
+    {% if manuais %}
+    <h3>Concursos adicionados manualmente</h3>
+    <table>
+      <thead><tr><th>Órgão</th><th>UF</th><th>Inscrições até</th><th>Prova</th><th></th></tr></thead>
+      <tbody>
+      {% for c in manuais %}
+        <tr>
+          <td>{{ c.orgao }}</td><td>{{ c.uf or '—' }}</td>
+          <td>{{ c.inscricao_fim or '—' }}</td><td>{{ c.prova_data or '—' }}</td>
+          <td><form method="post" action="/admin/concurso/{{ c.id }}/delete"
+                onsubmit="return confirm('Excluir {{ c.orgao }}?')">
+              <button class="btn-mini danger">excluir</button></form></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+  </details>
+
+  <p class="admin-note">Registro público de contas: <strong>{{ 'ativado' if open_registration else 'desativado' }}</strong>
+    (variável <code>OPEN_REGISTRATION</code>). Coleta automática diária às <code>SCRAPE_HOUR</code>h15 (America/Sao_Paulo).</p>
+</main>
+{% endblock %}

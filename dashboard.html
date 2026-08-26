@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+{% block title %}Dashboard de Oportunidades{% endblock %}
+{% block body %}
+<header class="topbar">
+  <div class="topbar-inner">
+    <div class="brand">🎯 Dashboard de <span>Oportunidades</span></div>
+    <nav class="topnav">
+      <span class="hello">Olá, {{ user.name.split(' ')[0] }}</span>
+      {% if user.is_admin %}<a href="/admin" class="nav-link">Admin</a>{% endif %}
+      <a href="/logout" class="nav-link">Sair</a>
+    </nav>
+  </div>
+</header>
+
+<main class="layout">
+  <aside class="filters">
+    <h2>Filtros</h2>
+
+    <label class="f-label">Buscar
+      <input type="search" id="f-q" placeholder="órgão, cargo, banca...">
+    </label>
+
+    <label class="f-label">Região
+      <select id="f-regiao">
+        <option value="">Todas</option>
+        {% for r in regioes %}<option value="{{ r }}">{{ r }}</option>{% endfor %}
+      </select>
+    </label>
+
+    <label class="f-label">Estado (UF)
+      <select id="f-uf">
+        <option value="">Todos</option>
+        {% for sigla, nome in ufs.items() %}<option value="{{ sigla }}">{{ sigla }} — {{ nome }}</option>{% endfor %}
+      </select>
+    </label>
+
+    <label class="f-label">Inscrições até
+      <input type="date" id="f-inscricao-ate">
+    </label>
+
+    <div class="f-label">Data da prova
+      <div class="date-pair">
+        <input type="date" id="f-prova-de" title="de">
+        <input type="date" id="f-prova-ate" title="até">
+      </div>
+    </div>
+
+    <label class="f-label">Ordenar por
+      <select id="f-order">
+        <option value="inscricao_fim">Prazo de inscrição</option>
+        <option value="prova_data">Data da prova</option>
+        <option value="vagas">Mais vagas</option>
+        <option value="salario">Maior salário</option>
+        <option value="recentes">Mais recentes</option>
+      </select>
+    </label>
+
+    <label class="f-label">Status do edital
+      <select id="f-status-edital">
+        <option value="">Todos</option>
+        {% for s in status_edital %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
+      </select>
+    </label>
+
+    <label class="f-label">Situação
+      <select id="f-fase">
+        <option value="abertas">Inscrições abertas</option>
+        <option value="aguardando_prova">Inscrições encerradas — aguardando prova</option>
+        <option value="prova_realizada">Prova realizada</option>
+        <option value="todas">Todas</option>
+      </select>
+    </label>
+
+    <div class="f-label">Fases do concurso
+      <div class="materias-box etapas-box">
+        {% for e in etapas %}
+        <label class="chk"><input type="checkbox" value="{{ e }}" class="f-etapa"> <span>{{ e }}</span></label>
+        {% endfor %}
+      </div>
+    </div>
+
+    <div class="f-label">Matérias / áreas
+      <input type="search" id="f-materia-busca" placeholder="filtrar lista..." class="mini-search">
+      <div class="materias-box" id="materias-box">
+        {% for m in materias %}
+        <label class="chk"><input type="checkbox" value="{{ m }}" class="f-materia"> <span>{{ m }}</span></label>
+        {% endfor %}
+      </div>
+    </div>
+
+    <button id="f-limpar" class="btn-ghost">Limpar filtros</button>
+  </aside>
+
+  <section class="content">
+    <div class="stats" id="stats">
+      <div class="stat"><div class="stat-num" id="st-count">–</div><div class="stat-label">concursos listados</div></div>
+      <div class="stat"><div class="stat-num" id="st-vagas">–</div><div class="stat-label">vagas abertas</div></div>
+      <div class="stat"><div class="stat-num" id="st-prova">–</div><div class="stat-label">com data de prova</div></div>
+      <div class="stat"><div class="stat-num small" id="st-coleta">–</div><div class="stat-label">última atualização</div></div>
+    </div>
+
+    {% if noticias %}
+    <details class="news-panel">
+      <summary>📰 Últimas notícias de editais <span class="news-src">(Gran Cursos + Estratégia)</span></summary>
+      <ul class="news-list">
+        {% for n in noticias %}
+        <li>
+          <a href="{{ n.url }}" target="_blank" rel="noopener">{{ n.titulo }}</a>
+          <span class="news-meta">{{ n.fonte }}{% if n.publicado_em %} · {{ n.publicado_em[:10].split('-')|reverse|join('/') }}{% endif %}</span>
+        </li>
+        {% endfor %}
+      </ul>
+    </details>
+    {% endif %}
+
+    <div class="pager" id="pager-top"></div>
+    <div id="cards" class="cards" aria-live="polite"></div>
+    <div class="pager" id="pager-bottom"></div>
+    <div id="empty" class="empty" hidden>
+      <p>Nenhum concurso encontrado com esses filtros.</p>
+    </div>
+  </section>
+</main>
+
+<script src="/static/app.js?v=21"></script>
+{% endblock %}
