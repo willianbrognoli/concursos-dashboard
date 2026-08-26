@@ -55,6 +55,13 @@
       </select>
     </label>
 
+    <label class="f-label">Status do edital
+      <select id="f-status-edital">
+        <option value="">Todos</option>
+        {% for s in status_edital %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
+      </select>
+    </label>
+
     <label class="f-label">Situação
       <select id="f-fase">
         <option value="abertas">Inscrições abertas</option>
@@ -115,5 +122,5 @@
   </section>
 </main>
 
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v=21"></script>
 {% endblock %}

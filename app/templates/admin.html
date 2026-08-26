@@ -104,6 +104,11 @@
       <label>Fim das inscrições<input name="inscricao_fim" type="date"></label>
       <label>Data da prova<input name="prova_data" type="date"></label>
       <label>Banca<input name="banca"></label>
+      <label>Status do edital
+        <select name="edital_status"><option value="">automático (pelas datas)</option>
+          {% for s in status_edital_all %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
+        </select>
+      </label>
       <label>Link de inscrição<input name="url_inscricao" type="url"></label>
       <label class="span2">Matérias (separadas por vírgula)
         <input name="materias" placeholder="Direito Constitucional, Língua Portuguesa">
