@@ -94,10 +94,11 @@
       : (c.uf ? `<span class="uf-pill">${esc(c.uf)}</span>` : "");
 
     return `<article class="card ${urgente ? "urgente" : ""}">
-      <div class="card-head"><h3 class="card-title">${fonte}</h3>${ufPill}</div>
+      <div class="card-head"><h3 class="card-title">${fonte}</h3>
+        <div class="head-tags">${faseBadge}${ufPill}</div></div>
       ${c.cargos ? `<div class="card-cargos">${esc(c.cargos)}</div>` : ""}
       <div class="card-meta">${meta.join("")}</div>
-      ${(deadlineTxt || faseBadge) ? `<div class="deadline ${deadlineCls}">${faseBadge}${deadlineTxt && !inscricaoPassou ? "⏳ " + deadlineTxt : ""}</div>` : ""}
+      ${(deadlineTxt && !inscricaoPassou) ? `<div class="deadline ${deadlineCls}">⏳ ${deadlineTxt}</div>` : ""}
       ${etapaTags ? `<div class="tags">${etapaTags}</div>` : ""}
       ${(tags || mais) ? `<div class="tags">${tags}${mais}</div>` : ""}
       <div class="card-foot">${prova}
