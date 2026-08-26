@@ -426,6 +426,35 @@ def run_scrape(max_articles: int = 60, delay: float = 1.0) -> dict:
     if found > max_articles:
         detail_msgs.append(f"limite de artigos por coleta: {max_articles} (ficaram {found - max_articles})")
 
+    # REPROCESSO RETROATIVO: concursos antigos (sem texto_base guardado) têm o
+    # artigo original rebaixado UMA vez e reanalisado com o parser atual —
+    # corrige cargos, datas, fases, matérias e status do acervo inteiro.
+    with dbm.get_db() as db:
+        antigos = db.execute(
+            "SELECT c.id, c.url_fonte, COALESCE(n.titulo, c.orgao) AS titulo "
+            "FROM concursos c LEFT JOIN noticias n ON n.url = c.url_fonte "
+            "WHERE c.status='aberto' AND c.origem='scraper' "
+            "AND (c.texto_base IS NULL OR c.texto_base='') "
+            "AND c.url_fonte LIKE 'http%' ORDER BY c.id LIMIT 40"
+        ).fetchall()
+    reproc = 0
+    for row in antigos:
+        try:
+            html = fetch(row["url_fonte"], session)
+            art = parse_artigo(html, row["titulo"])
+            data = montar_concurso("reprocesso", row["titulo"], row["url_fonte"], art)
+            with dbm.get_db() as db:
+                dbm.upsert_concurso(db, data)
+            reproc += 1
+        except Exception as e:
+            errors += 1
+            log.warning("Reprocesso falhou p/ %s: %s", row["url_fonte"], e)
+        time.sleep(delay)
+    if reproc:
+        detail_msgs.append(f"acervo reprocessado: {reproc}")
+    if len(antigos) == 40:
+        detail_msgs.append("reprocesso continua na próxima coleta")
+
     # re-detecção nos abertos vindos do scraper: recalcula matérias/fases/status
     # a partir do texto guardado (aplica padrões novos E remove falsos positivos)
     import json as _json
@@ -458,17 +487,22 @@ def run_scrape(max_articles: int = 60, delay: float = 1.0) -> dict:
             prova = r["prova_data"]
             if prova and r["inscricao_fim"] and prova <= r["inscricao_fim"]:
                 prova = None
+            # cargos com frase vazada (extração antiga) são limpos
+            cargos = r["cargos"]
+            if cargos and re.search(r"inscri|r\$|vencimento|remunera|\bvagas\b|distribu|concorrencia|abert[oa]s\b",
+                                    _norm(cargos)):
+                cargos = None
             mudou = (sorted(novas_m) != sorted(_json.loads(r["materias"] or "[]")) or
                      sorted(novas_e) != sorted(_json.loads(r["etapas"] or "[]")) or
-                     novo_s != atual_s or prova != r["prova_data"])
+                     novo_s != atual_s or prova != r["prova_data"] or cargos != r["cargos"])
             if mudou:
                 db.execute(
-                    "UPDATE concursos SET materias=?, etapas=?, edital_status=?, "
+                    "UPDATE concursos SET materias=?, etapas=?, edital_status=?, cargos=?, "
                     "prova_data=?, prova_texto=CASE WHEN ? IS NULL THEN NULL ELSE prova_texto END, "
                     "updated_at=? WHERE id=?",
                     (_json.dumps(sorted(novas_m), ensure_ascii=False),
                      _json.dumps(sorted(novas_e), ensure_ascii=False),
-                     novo_s, prova, prova, dbm.now_iso(), r["id"]))
+                     novo_s, cargos, prova, prova, dbm.now_iso(), r["id"]))
 
     with dbm.get_db() as db:
         dedup = dbm.dedupe_open(db)
