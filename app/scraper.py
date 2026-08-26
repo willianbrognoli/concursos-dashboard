@@ -22,7 +22,8 @@ import requests
 from bs4 import BeautifulSoup
 
 from . import db as dbm
-from .materias import NOMES_UF, UFS, detectar_etapas, detectar_materias, regiao_da_uf
+from .materias import (NOMES_UF, UFS, detectar_etapas, detectar_materias,
+                       detectar_status_edital, regiao_da_uf)
 
 log = logging.getLogger("scraper")
 
@@ -213,9 +214,12 @@ def parse_artigo(html: str, titulo: str):
             out["salario_num"] = maior
             out["salario"] = "R$ " + f"{maior:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
-    # data da prova
+    # data da prova — nunca em frase que fala de inscrição (evita capturar o
+    # prazo de inscrição como data de prova)
     for s in sentences:
         ns = _norm(s)
+        if "inscri" in ns:
+            continue
         if re.search(r"\bprovas?\b|\bavaliacao objetiva\b|\bexame\b", ns) and \
            re.search(r"prevista|aplicad|realizad|marcad|agendad|ocorrer|acontec|data d", ns):
             d = None
@@ -271,10 +275,28 @@ def parse_artigo(html: str, titulo: str):
     if mt:
         out["taxa"] = "R$ " + mt.group(1)
 
-    # cargos ("para o cargo de X", "cargos de X e Y")
-    mc = re.search(r"cargos? d[eo]s?\s+([^.;!?]{4,120})", text, re.I)
-    if mc:
-        out["cargos"] = mc.group(1).strip().rstrip(",")[:300]
+    # cargos ("para o cargo de X", "cargos de X e Y") — dentro de UMA frase,
+    # cortando onde o assunto muda (vagas, inscrições, salário...)
+    CARGO_CUT = re.compile(
+        r"\s+(?:est[aã]o|estar[aã]o|ser[aã]o|ser[aá]\b|v[aã]o\b|t[eê]m\b|distribu\w*|"
+        r"as inscri\w*|o vencimento|a remunera\w*|com sal[aá]rio|com remunera\w*|"
+        r"abert[oa]s\b|em breve|no dia\b|at[eé]\b|que\b|para concorrer|oferecid\w*|"
+        r"exig\w*|com carga|cuja\w*).*$", re.I)
+    for s in sentences:
+        mc = re.search(r"cargos? d[eo]s?\s+([^.;:!?\n]{4,120})", s, re.I)
+        if not mc:
+            continue
+        cand = CARGO_CUT.sub("", mc.group(1)).strip().rstrip(",;-–— ")
+        ncand = _norm(cand)
+        if len(cand) >= 4 and not re.search(r"inscri|r\$|vencimento|remunera|\bvagas\b", ncand):
+            out["cargos"] = cand[:300]
+            break
+
+    # sanidade: prova nunca acontece antes de encerrarem as inscrições
+    if out.get("prova_data") and out.get("inscricao_fim") and \
+       out["prova_data"] <= out["inscricao_fim"]:
+        out.pop("prova_data", None)
+        out.pop("prova_texto", None)
 
     # escolaridade
     niveis = []
@@ -318,6 +340,8 @@ def montar_concurso(fonte: str, titulo: str, link: str, art: dict) -> dict:
         "regiao": regiao_da_uf(uf),
         "materias": detectar_materias(texto, titulo, art.get("cargos")),
         "etapas": detectar_etapas(texto, titulo),
+        "edital_status": detectar_status_edital(titulo, texto),
+        "texto_base": (titulo + "\n" + texto)[:6000],
         "origem": "scraper",
         "detalhado": 1,
     })
@@ -330,11 +354,15 @@ def eh_noticia_de_concurso(titulo: str) -> bool:
 
 
 def vale_criar_concurso(art: dict, titulo: str) -> bool:
-    """Só cria o card se o artigo tem cara de edital/concurso concreto."""
+    """Cria o card se o artigo tem dados concretos OU um status de pipeline
+    (previsto/autorizado/banca definida...), para acompanhar o edital desde cedo."""
     nt = _norm(titulo)
+    tem_gatilho = bool(re.search(r"edital|inscric|concurso|processo seletivo", nt))
+    if not tem_gatilho:
+        return False
     tem_dado = any(art.get(k) for k in ("vagas", "inscricao_fim", "prova_data", "banca"))
-    tem_gatilho = bool(re.search(r"edital|inscric|concurso", nt))
-    return tem_dado and tem_gatilho
+    tem_status = detectar_status_edital(titulo, art.get("_texto", "")) is not None
+    return tem_dado or tem_status
 
 
 # ----------------------------------------------------------------- run
@@ -398,19 +426,49 @@ def run_scrape(max_articles: int = 60, delay: float = 1.0) -> dict:
     if found > max_articles:
         detail_msgs.append(f"limite de artigos por coleta: {max_articles} (ficaram {found - max_articles})")
 
-    # re-detecção de matérias/fases nos abertos (aplica padrões novos ao acervo)
+    # re-detecção nos abertos vindos do scraper: recalcula matérias/fases/status
+    # a partir do texto guardado (aplica padrões novos E remove falsos positivos)
     import json as _json
+    from .materias import STATUS_EDITAL
     with dbm.get_db() as db:
-        for r in db.execute("SELECT id, orgao, cargos, resumo, materias, etapas FROM concursos WHERE status='aberto'").fetchall():
-            novas_m = set(detectar_materias(r["orgao"], r["cargos"], r["resumo"]))
-            atuais_m = set(_json.loads(r["materias"] or "[]"))
-            novas_e = set(detectar_etapas(r["orgao"], r["cargos"], r["resumo"]))
-            atuais_e = set(_json.loads(r["etapas"] or "[]"))
-            if (novas_m - atuais_m) or (novas_e - atuais_e):
-                db.execute("UPDATE concursos SET materias=?, etapas=?, updated_at=? WHERE id=?",
-                           (_json.dumps(sorted(atuais_m | novas_m), ensure_ascii=False),
-                            _json.dumps(sorted(atuais_e | novas_e), ensure_ascii=False),
-                            dbm.now_iso(), r["id"]))
+        for r in db.execute(
+            "SELECT id, orgao, cargos, resumo, texto_base, materias, etapas, edital_status, "
+            "prova_data, inscricao_fim FROM concursos WHERE status='aberto' AND origem='scraper'"
+        ).fetchall():
+            base = r["texto_base"] or ""
+            if base:
+                novas_m = set(detectar_materias(base, r["orgao"], r["cargos"]))
+                novas_e = set(detectar_etapas(base, r["orgao"], r["cargos"]))
+                novo_s = detectar_status_edital(base)
+            else:  # linhas antigas sem texto guardado
+                novas_m = set(detectar_materias(r["orgao"], r["cargos"], r["resumo"]))
+                novas_e = set(detectar_etapas(r["orgao"], r["cargos"], r["resumo"])) | \
+                          set(_json.loads(r["etapas"] or "[]"))
+                novo_s = detectar_status_edital(r["orgao"], r["cargos"], r["resumo"])
+            # status nunca regride
+            atual_s = r["edital_status"]
+            if atual_s and novo_s:
+                try:
+                    if STATUS_EDITAL.index(novo_s) < STATUS_EDITAL.index(atual_s):
+                        novo_s = atual_s
+                except ValueError:
+                    pass
+            novo_s = novo_s or atual_s
+            # sanidade retroativa: prova antes do fim das inscrições = dado errado
+            prova = r["prova_data"]
+            if prova and r["inscricao_fim"] and prova <= r["inscricao_fim"]:
+                prova = None
+            mudou = (sorted(novas_m) != sorted(_json.loads(r["materias"] or "[]")) or
+                     sorted(novas_e) != sorted(_json.loads(r["etapas"] or "[]")) or
+                     novo_s != atual_s or prova != r["prova_data"])
+            if mudou:
+                db.execute(
+                    "UPDATE concursos SET materias=?, etapas=?, edital_status=?, "
+                    "prova_data=?, prova_texto=CASE WHEN ? IS NULL THEN NULL ELSE prova_texto END, "
+                    "updated_at=? WHERE id=?",
+                    (_json.dumps(sorted(novas_m), ensure_ascii=False),
+                     _json.dumps(sorted(novas_e), ensure_ascii=False),
+                     novo_s, prova, prova, dbm.now_iso(), r["id"]))
 
     with dbm.get_db() as db:
         dedup = dbm.dedupe_open(db)

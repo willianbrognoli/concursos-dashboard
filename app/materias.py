@@ -118,6 +118,54 @@ def detectar_materias(*textos) -> list:
     return sorted(found)
 
 
+# ------------------------------------------------------- status do edital
+# ordem do pipeline (do mais cedo ao mais tarde)
+STATUS_EDITAL = [
+    "Em Estudo", "Previsto", "Autorizado", "Comissão Formada", "Banca Definida",
+    "Edital Aberto", "Inscrições Abertas", "Inscrições Encerradas",
+    "Prova Realizada", "Homologado",
+]
+
+STATUS_EDITAL_PATTERNS = {
+    "Em Estudo": [r"\bem estudos?\b", r"estudos (?:iniciais|para o concurso)",
+                  r"intencao de realizar", r"planeja (?:realizar|abrir) concurso"],
+    "Previsto": [r"edital[^.]{0,30}(?:previsto|iminente|aguardado|a caminho|deve (?:sair|ser publicado))",
+                 r"concurso[^.]{0,30}(?:previsto|iminente|confirmado para)",
+                 r"expectativa d[eo] (?:edital|concurso)", r"aguarda (?:o )?(?:novo )?edital",
+                 r"novo concurso[^.]{0,20}previsto", r"edital pode (?:sair|ser publicado)"],
+    "Autorizado": [r"\bautorizad[oa]\b", r"autorizacao d[oe] concurso",
+                   r"concurso[^.]{0,30}autorizad"],
+    "Comissão Formada": [r"comissao[^.]{0,40}(?:formada|instituida|constituida|definida|criada|nomeada)",
+                         r"(?:formacao|criacao|instituicao) da comissao",
+                         r"grupo de trabalho[^.]{0,30}(?:formado|instituido|criado)"],
+    "Banca Definida": [r"banca[^.]{0,40}(?:definida|contratada|escolhida|selecionada|confirmada)",
+                       r"sera a banca", r"e a banca (?:organizadora|do concurso)",
+                       r"contratacao da banca[^.]{0,30}(?:concluida|finalizada|assinada)"],
+    "Edital Aberto": [r"edital[^.]{0,30}(?:publicado|divulgado|lancado|liberado|no ar)",
+                      r"saiu o edital", r"edital saiu", r"publicacao do edital",
+                      r"edital esta disponivel"],
+    "Inscrições Abertas": [r"inscricoes (?:estao )?abertas", r"inscricoes comecam",
+                           r"periodo de inscricao aberto"],
+    "Inscrições Encerradas": [r"inscricoes (?:estao )?encerradas", r"fim das inscricoes",
+                              r"inscricoes terminaram"],
+    "Prova Realizada": [r"provas? (?:foi|foram) (?:aplicada|realizada)s?",
+                        r"apos a aplicacao das provas", r"gabarito (?:preliminar|oficial)"],
+    "Homologado": [r"\bhomologad[oa]\b", r"homologacao do (?:resultado|concurso)"],
+}
+
+_STATUS_COMPILED = {s: [re.compile(p) for p in pats] for s, pats in STATUS_EDITAL_PATTERNS.items()}
+
+
+def detectar_status_edital(*textos):
+    """Retorna o status mais avançado do pipeline citado no texto, ou None."""
+    texto = _norm(" \n ".join(t for t in textos if t))
+    achado = None
+    for status in STATUS_EDITAL:  # ordem do pipeline; o último achado vence
+        if any(p.search(texto) for p in _STATUS_COMPILED[status]):
+            achado = status
+    return achado
+
+
 # ---------------------------------------------------------------- fases
 # fase do certame -> padrões (regex sobre texto normalizado sem acento),
 # incluindo os sinônimos usuais dos editais/notícias

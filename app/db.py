@@ -5,6 +5,8 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
+from .materias import STATUS_EDITAL
+
 DB_PATH = os.environ.get("DB_PATH", "/data/concursos.db")
 
 SCHEMA = """
@@ -50,6 +52,8 @@ CREATE TABLE IF NOT EXISTS concursos (
     taxa TEXT,
     materias TEXT NOT NULL DEFAULT '[]',  -- JSON list
     etapas TEXT NOT NULL DEFAULT '[]',    -- JSON list (fases do certame)
+    edital_status TEXT,                   -- status citado no texto (pipeline do edital)
+    texto_base TEXT,                      -- texto do artigo p/ re-detecção
     resumo TEXT,
     url_inscricao TEXT,
     status TEXT NOT NULL DEFAULT 'aberto', -- aberto | encerrado
@@ -120,10 +124,14 @@ def get_db():
 def init_db():
     with get_db() as db:
         db.executescript(SCHEMA)
-        # migração: bancos criados antes da v2.0 não têm a coluna etapas
+        # migrações de bancos antigos
         cols = [r["name"] for r in db.execute("PRAGMA table_info(concursos)").fetchall()]
         if "etapas" not in cols:
             db.execute("ALTER TABLE concursos ADD COLUMN etapas TEXT NOT NULL DEFAULT '[]'")
+        if "edital_status" not in cols:
+            db.execute("ALTER TABLE concursos ADD COLUMN edital_status TEXT")
+        if "texto_base" not in cols:
+            db.execute("ALTER TABLE concursos ADD COLUMN texto_base TEXT")
 
 
 # ---------------------------------------------------------------- users
@@ -178,7 +186,8 @@ CONCURSO_FIELDS = [
     "url_fonte", "orgao", "uf", "regiao", "vagas", "vagas_texto", "salario",
     "salario_num", "cargos", "escolaridade", "inscricao_inicio", "inscricao_fim",
     "inscricao_texto", "prova_data", "prova_texto", "banca", "taxa", "materias",
-    "etapas", "resumo", "url_inscricao", "status", "origem", "detalhado",
+    "etapas", "edital_status", "texto_base", "resumo", "url_inscricao", "status",
+    "origem", "detalhado",
 ]
 
 _JSON_LIST_FIELDS = ("materias", "etapas")
@@ -216,6 +225,13 @@ def upsert_concurso(db, data: dict) -> str:
                     old = []
                 new = json.loads(new_val) if new_val else []
                 merged[f] = json.dumps(sorted(set(old) | set(new)), ensure_ascii=False)
+            elif f == "edital_status" and new_val and existing["edital_status"]:
+                # nunca regredir no pipeline (notícia antiga não volta o status)
+                try:
+                    avanca = STATUS_EDITAL.index(new_val) >= STATUS_EDITAL.index(existing["edital_status"])
+                except ValueError:
+                    avanca = True
+                merged[f] = new_val if avanca else existing["edital_status"]
             elif new_val not in (None, "", []):
                 merged[f] = new_val
             else:
@@ -247,11 +263,13 @@ def purge_old(db, days: int = 90) -> int:
     """Remove concursos muito antigos (prova realizada ou inscrição encerrada há mais de N dias)."""
     from datetime import timedelta
     cutoff = (datetime.now().date() - timedelta(days=days)).isoformat()
+    stale = (datetime.now().date() - timedelta(days=days + 30)).isoformat()
     cur = db.execute(
         "DELETE FROM concursos WHERE origem != 'manual' AND ("
         " (prova_data IS NOT NULL AND prova_data < ?) OR"
-        " (prova_data IS NULL AND inscricao_fim IS NOT NULL AND inscricao_fim < ?))",
-        (cutoff, cutoff),
+        " (prova_data IS NULL AND inscricao_fim IS NOT NULL AND inscricao_fim < ?) OR"
+        " (prova_data IS NULL AND inscricao_fim IS NULL AND substr(updated_at,1,10) < ?))",
+        (cutoff, cutoff, stale),
     )
     return cur.rowcount
 
@@ -295,12 +313,30 @@ def close_expired(db) -> int:
     return cur.rowcount
 
 
+# status efetivo = status citado no texto corrigido pelas datas
+_EFFECTIVE_STATUS_SQL = """
+CASE
+  WHEN edital_status = 'Homologado' THEN 'Homologado'
+  WHEN prova_data IS NOT NULL AND prova_data < ? THEN 'Prova Realizada'
+  WHEN inscricao_fim IS NOT NULL AND inscricao_fim < ? THEN 'Inscrições Encerradas'
+  WHEN inscricao_fim IS NOT NULL THEN 'Inscrições Abertas'
+  WHEN edital_status IS NOT NULL THEN edital_status
+  WHEN banca IS NOT NULL OR prova_data IS NOT NULL THEN 'Edital Aberto'
+  ELSE NULL
+END
+"""
+
+
 def query_concursos(db, *, q=None, materias=None, etapas=None, uf=None, regiao=None,
                     inscricao_ate=None, prova_de=None, prova_ate=None,
-                    status="aberto", fase=None, order="inscricao_fim", limit=500):
-    sql = "SELECT * FROM concursos WHERE 1=1"
-    params: list = []
+                    status="aberto", fase=None, edital_status=None,
+                    order="inscricao_fim", limit=500):
     today = datetime.now().date().isoformat()
+    sql = f"SELECT *, ({_EFFECTIVE_STATUS_SQL}) AS status_efetivo FROM concursos WHERE 1=1"
+    params: list = [today, today]
+    if edital_status:
+        sql += f" AND ({_EFFECTIVE_STATUS_SQL}) = ?"
+        params += [today, today, edital_status]
     if fase:
         # fase deriva das datas e tem prioridade sobre status
         if fase == "abertas":
