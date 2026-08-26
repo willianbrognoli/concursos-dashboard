@@ -122,6 +122,9 @@ button { font-family: inherit; cursor: pointer; }
 }
 .fase-badge.aguardando { background: #fdf3dc; color: #8a6414; border: 1px solid #ecd9a4; }
 .fase-badge.realizada { background: #e9ecf4; color: var(--ink-2); border: 1px solid var(--line); }
+.fase-badge.pipeline { background: #eef3fb; color: #2c4a8a; border: 1px solid #ccd9f0; }
+.fase-badge.aberto { background: #e6f5ec; color: var(--ok); border: 1px solid #bfe3cd; }
+.fase-badge.homologado { background: var(--navy); color: #fff; border: 1px solid var(--navy); }
 .tags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 2px; }
 .tag {
   font-size: 11.5px; font-weight: 600; color: var(--navy); background: #eef0f9;

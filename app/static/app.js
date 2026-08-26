@@ -11,7 +11,7 @@
   const els = {
     q: $("f-q"), regiao: $("f-regiao"), uf: $("f-uf"),
     inscricaoAte: $("f-inscricao-ate"), provaDe: $("f-prova-de"), provaAte: $("f-prova-ate"),
-    order: $("f-order"), fase: $("f-fase"),
+    order: $("f-order"), fase: $("f-fase"), statusEdital: $("f-status-edital"),
   };
 
   function materiasSelecionadas() {
@@ -55,13 +55,19 @@
     }
     const urgente = dias !== null && dias >= 0 && dias <= 7;
 
-    // fase derivada das datas
+    // tag de status do edital (vem calculada da API: texto + datas)
     const hoje = new Date(); hoje.setHours(0, 0, 0, 0);
     const provaPassou = c.prova_data && new Date(c.prova_data + "T00:00:00") < hoje;
     const inscricaoPassou = dias !== null && dias < 0;
-    let faseBadge = "";
-    if (provaPassou) faseBadge = `<span class="fase-badge realizada">Prova realizada</span>`;
-    else if (inscricaoPassou) faseBadge = `<span class="fase-badge aguardando">Aguardando prova</span>`;
+    const st = c.status_efetivo;
+    const stCls = {
+      "Em Estudo": "pipeline", "Previsto": "pipeline", "Autorizado": "pipeline",
+      "Comissão Formada": "pipeline", "Banca Definida": "pipeline",
+      "Edital Aberto": "aberto", "Inscrições Abertas": "aberto",
+      "Inscrições Encerradas": "aguardando", "Prova Realizada": "realizada",
+      "Homologado": "homologado",
+    }[st] || "pipeline";
+    const faseBadge = st ? `<span class="fase-badge ${stCls}">${esc(st)}</span>` : "";
 
     const tags = (c.materias || []).slice(0, 6).map(m => `<span class="tag">${esc(m)}</span>`).join("");
     const mais = (c.materias || []).length > 6 ? `<span class="tag mais">+${c.materias.length - 6}</span>` : "";
@@ -109,6 +115,7 @@
     if (els.provaDe.value) p.set("prova_de", els.provaDe.value);
     if (els.provaAte.value) p.set("prova_ate", els.provaAte.value);
     p.set("fase", els.fase.value);
+    if (els.statusEdital.value) p.set("edital_status", els.statusEdital.value);
     p.set("order", els.order.value);
     const mats = materiasSelecionadas();
     if (mats.length) p.set("materia", mats.join("|"));
@@ -173,7 +180,7 @@
   function debounced() { clearTimeout(t); t = setTimeout(carregar, 300); }
 
   els.q.addEventListener("input", debounced);
-  ["regiao", "uf", "inscricaoAte", "provaDe", "provaAte", "order", "fase"].forEach(k =>
+  ["regiao", "uf", "inscricaoAte", "provaDe", "provaAte", "order", "fase", "statusEdital"].forEach(k =>
     els[k].addEventListener("change", carregar));
   document.querySelectorAll(".f-materia").forEach(c => c.addEventListener("change", carregar));
   document.querySelectorAll(".f-etapa").forEach(c => c.addEventListener("change", carregar));
@@ -189,7 +196,7 @@
   $("f-limpar").addEventListener("click", () => {
     els.q.value = ""; els.regiao.value = ""; els.uf.value = "";
     els.inscricaoAte.value = ""; els.provaDe.value = ""; els.provaAte.value = "";
-    els.order.value = "inscricao_fim"; els.fase.value = "abertas";
+    els.order.value = "inscricao_fim"; els.fase.value = "abertas"; els.statusEdital.value = "";
     document.querySelectorAll(".f-materia:checked").forEach(c => (c.checked = false));
     document.querySelectorAll(".f-etapa:checked").forEach(c => (c.checked = false));
     if (buscaMateria) { buscaMateria.value = ""; }
