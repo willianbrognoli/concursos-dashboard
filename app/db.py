@@ -81,6 +81,18 @@ CREATE TABLE IF NOT EXISTS noticias (
 
 CREATE INDEX IF NOT EXISTS idx_noticias_pub ON noticias(publicado_em);
 
+-- sincronização externa (API /api/v1): exclusões ficam registradas aqui
+CREATE TABLE IF NOT EXISTS concursos_removidos (
+    id INTEGER PRIMARY KEY,     -- mesmo id que o concurso tinha
+    url_fonte TEXT,
+    orgao TEXT,
+    uf TEXT,
+    motivo TEXT,                -- antigo | duplicata | manual
+    removido_em TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_removidos_em ON concursos_removidos(removido_em);
+CREATE INDEX IF NOT EXISTS idx_concursos_sync ON concursos(updated_at, id);
+
 CREATE TABLE IF NOT EXISTS scrape_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     started_at TEXT NOT NULL,
@@ -259,18 +271,35 @@ def upsert_concurso(db, data: dict) -> str:
         return "created"
 
 
+def registrar_remocao(db, ids, motivo: str) -> None:
+    """Guarda o registro de concursos excluídos para a API de sincronização."""
+    ts = now_iso()
+    for cid in ids:
+        r = db.execute("SELECT id, url_fonte, orgao, uf FROM concursos WHERE id=?", (cid,)).fetchone()
+        if r:
+            db.execute(
+                "INSERT OR REPLACE INTO concursos_removidos (id, url_fonte, orgao, uf, motivo, removido_em) "
+                "VALUES (?,?,?,?,?,?)", (r["id"], r["url_fonte"], r["orgao"], r["uf"], motivo, ts))
+
+
+def remover_concurso(db, cid: int, motivo: str = "manual") -> None:
+    registrar_remocao(db, [cid], motivo)
+    db.execute("DELETE FROM concursos WHERE id=?", (cid,))
+
+
 def purge_old(db, days: int = 90) -> int:
     """Remove concursos muito antigos (prova realizada ou inscrição encerrada há mais de N dias)."""
     from datetime import timedelta
     cutoff = (datetime.now().date() - timedelta(days=days)).isoformat()
     stale = (datetime.now().date() - timedelta(days=days + 30)).isoformat()
-    cur = db.execute(
-        "DELETE FROM concursos WHERE origem != 'manual' AND ("
-        " (prova_data IS NOT NULL AND prova_data < ?) OR"
-        " (prova_data IS NULL AND inscricao_fim IS NOT NULL AND inscricao_fim < ?) OR"
-        " (prova_data IS NULL AND inscricao_fim IS NULL AND substr(updated_at,1,10) < ?))",
-        (cutoff, cutoff, stale),
-    )
+    where = ("origem != 'manual' AND ("
+             " (prova_data IS NOT NULL AND prova_data < ?) OR"
+             " (prova_data IS NULL AND inscricao_fim IS NOT NULL AND inscricao_fim < ?) OR"
+             " (prova_data IS NULL AND inscricao_fim IS NULL AND substr(updated_at,1,10) < ?))")
+    ids = [r["id"] for r in db.execute(f"SELECT id FROM concursos WHERE {where}",
+                                       (cutoff, cutoff, stale)).fetchall()]
+    registrar_remocao(db, ids, "antigo")
+    cur = db.execute(f"DELETE FROM concursos WHERE {where}", (cutoff, cutoff, stale))
     return cur.rowcount
 
 
@@ -293,6 +322,7 @@ def dedupe_open(db) -> int:
                        (json.dumps(sorted(keeper["materias"]), ensure_ascii=False),
                         json.dumps(sorted(keeper["etapas"]), ensure_ascii=False),
                         now_iso(), keeper["id"]))
+            registrar_remocao(db, [r["id"]], "duplicata")
             db.execute("DELETE FROM concursos WHERE id=?", (r["id"],))
             removed += 1
         else:

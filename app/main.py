@@ -16,7 +16,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from . import auth, db as dbm, scraper
+from . import api, auth, db as dbm, scraper
 from .materias import ETAPAS, MATERIAS_PATTERNS, REGIOES, STATUS_EDITAL, UFS, regiao_da_uf
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -32,6 +32,7 @@ TZ = os.environ.get("TZ", "America/Sao_Paulo")
 app = FastAPI(title="Dashboard de Oportunidades", docs_url=None, redoc_url=None)
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+app.include_router(api.router)
 
 _scrape_lock = threading.Lock()
 _scrape_running = {"flag": False}
@@ -71,7 +72,8 @@ def run_scrape_bg(trigger: str = "agendado"):
         with _scrape_lock:
             _scrape_running["flag"] = True
             try:
-                scraper.run_scrape()
+                resumo = scraper.run_scrape()
+                api.notificar_webhooks("coleta_concluida", resumo)
             except Exception:
                 log.exception("Coleta falhou")
             finally:
@@ -323,6 +325,7 @@ def admin_add_concurso(request: Request, orgao: str = Form(...), uf: str = Form(
     }
     with dbm.get_db() as db:
         dbm.upsert_concurso(db, data)
+    api.notificar_webhooks("concurso_manual")
     return RedirectResponse("/admin?msg=concurso+salvo#concursos", status_code=302)
 
 
@@ -332,7 +335,8 @@ def admin_del_concurso(cid: int, request: Request):
     if redir:
         return redir
     with dbm.get_db() as db:
-        db.execute("DELETE FROM concursos WHERE id=?", (cid,))
+        dbm.remover_concurso(db, cid, "manual")
+    api.notificar_webhooks("concurso_removido")
     return RedirectResponse("/admin#concursos", status_code=302)
 
 
