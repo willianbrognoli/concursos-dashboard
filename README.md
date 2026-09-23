@@ -14,6 +14,9 @@ Dashboard de concursos públicos abertos em todo o Brasil, com:
 - **Painel admin**: usuários (promover/bloquear), logs de acesso, histórico
   de coletas, coleta manual e cadastro manual de concursos.
 
+- **API de sincronização** (`/api/v1`) para sistemas externos: carga completa,
+  incremental por cursor, exclusões e webhook de aviso. Ver **API.md**.
+
 ## Stack
 
 FastAPI · SQLite (arquivo único em `/data`) · Jinja2 · APScheduler ·

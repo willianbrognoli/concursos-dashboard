@@ -13,6 +13,10 @@ services:
       SCRAPE_HOUR: "6"
       SCRAPE_ON_START: "true"
       TZ: America/Sao_Paulo
+      # API de sincronização (ver API.md)
+      API_KEYS: "gere-uma-chave-longa"      # várias: separe por vírgula
+      WEBHOOK_URLS: ""                       # opcional: URL do sistema parceiro
+      WEBHOOK_SECRET: "gere-um-segredo"      # assina o aviso do webhook
     volumes:
       - concursos_data:/data
 
