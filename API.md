@@ -52,7 +52,7 @@ Resposta: `{ "data": [ { "id", "url_fonte", "orgao", "uf", "motivo", "removido_e
 Um concurso. Retorna **410** com os dados da remoção se ele foi excluído, **404** se nunca existiu.
 
 ### `GET /noticias`
-Notícias de editais (Gran Cursos, Estratégia, PCI). Parâmetros `desde_id` e `limit`. Resposta com `ultimo_id`.
+Notícias de editais (Gran Cursos, Estratégia, Implacável Concursos, Qconcursos Folha Dirigida). Parâmetros `desde_id` e `limit`. Resposta com `ultimo_id`.
 
 ### `GET /status`
 Totais e data da última coleta.

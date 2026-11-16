@@ -1,21 +1,27 @@
-"""Coletor de concursos a partir dos blogs Gran Cursos e Estratégia Concursos.
+"""Coletor de concursos a partir de blogs/portais de notícias de concursos.
 
-Fluxo (v2.0 — sem PCI):
-1. Lê os feeds RSS dos dois blogs.
+Fontes (FONTES): Gran Cursos, Estratégia e Implacável (RSS) e
+Qconcursos Folha Dirigida (sitemap Google News — o site não tem RSS).
+Monster Concursos ficou de fora: o blog fica atrás do "Vercel Security
+Checkpoint" (anti-robô) e devolve 429 para qualquer cliente HTTP.
+
+Fluxo (v2.1 — sem PCI):
+1. Lê a lista de notícias de cada fonte.
 2. Para cada notícia nova sobre edital/concurso, baixa o ARTIGO COMPLETO.
 3. Extrai do artigo: órgão, UF, vagas, salário, cargos, período de inscrição,
    data da prova, banca, taxa, link de inscrição, MATÉRIAS e as FASES do
    certame (objetiva, discursiva, TAF, psicológica, heteroidentificação etc.).
-4. Faz upsert por órgão+UF — notícias dos dois blogs sobre o mesmo concurso
+4. Faz upsert por órgão+UF — notícias de fontes diferentes sobre o mesmo concurso
    alimentam o MESMO card (fases e matérias vão sendo mescladas).
 
 O parser trabalha sobre o texto do artigo, tolerante a mudanças de layout.
 """
+import gzip
 import logging
 import re
 import time
 import unicodedata
-from datetime import datetime, date
+from datetime import datetime, date, timedelta, timezone
 
 import feedparser
 import requests
@@ -27,10 +33,24 @@ from .materias import (NOMES_UF, UFS, detectar_etapas, detectar_materias,
 
 log = logging.getLogger("scraper")
 
-RSS_FEEDS = [
-    ("Gran Cursos", "https://blog.grancursosonline.com.br/feed/"),
-    ("Estratégia", "https://www.estrategiaconcursos.com.br/blog/feed/"),
+# (nome, tipo, url) — tipo "rss" ou "news_sitemap" (sitemap Google News)
+FONTES = [
+    ("Gran Cursos", "rss", "https://blog.grancursosonline.com.br/feed/"),
+    ("Estratégia", "rss", "https://www.estrategiaconcursos.com.br/blog/feed/"),
+    ("Implacável", "rss", "https://implacavelconcursos.com.br/feed/"),
+    ("Folha Dirigida", "news_sitemap", "https://folha.qconcursos.com/daily_sitemap.xml.gz"),
 ]
+RSS_FEEDS = [(nome, url) for nome, tipo, url in FONTES if tipo == "rss"]  # compat
+
+# o sitemap também lista páginas "evergreen" (republicadas sempre);
+# só entram notícias publicadas há no máximo N dias
+SITEMAP_MAX_DIAS = 5
+
+# domínios que nunca são "link de inscrição" (blogs-fonte, redes, compartilhar)
+LINK_IGNORADO_RE = re.compile(
+    r"grancursosonline|estrategia|implacavelconcursos|qconcursos|facebook|twitter|"
+    r"x\.com|whatsapp|instagram|telegram|t\.me|youtube|linkedin|tiktok|pinterest|"
+    r"threads\.net|google\.com|bit\.ly")
 
 HEADERS = {
     "User-Agent": ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -65,7 +85,11 @@ TITULO_RUIDO_RE = re.compile(
     r"como estudar|dicas? de|simulado|apostila|mapa mental|questoes comentadas|"
     r"cronograma de estudos|resumo (?:de|sobre)|aula gratis|curso gratuito|"
     r"gabarito extraoficial|correcao (?:de|da) prova|raio[- ]?x|plano de estudos|"
-    r"o que (?:e|sao)|quanto ganha|saiba como|entenda", re.I)
+    r"o que (?:e|sao)|quanto ganha|saiba como|entenda|"
+    # matérias-resumo com dezenas de concursos (viram card falso)
+    r"concursos (?:publicos )?abertos somam|veja (?:a )?lista|vagas previstas|"
+    r"se destaca(?:m)? (?:nest[ae]|hoje)|"
+    r"nest[ae] (?:segunda|terca|quarta|quinta|sexta|sabado|domingo)(?:-feira)?,? \d", re.I)
 
 VERBOS_TITULO = (
     "tem|teve|abre|abriu|abrem|publica|publicou|publicado|oferece|oferta|esta|está|"
@@ -184,7 +208,7 @@ def extrair_uf(titulo: str, texto: str):
 def parse_artigo(html: str, titulo: str):
     """Extrai os dados do concurso do artigo completo do blog."""
     soup = BeautifulSoup(html, "lxml")
-    article = (soup.find("article") or soup.find("div", class_=re.compile(r"post-content|entry-content|single-content|article"))
+    article = (soup.find("article") or soup.find("div", class_=re.compile(r"post[-_]content|entry-content|single-content|article"))
                or soup.find("main") or soup)
     text = article.get_text(" ", strip=True)
     out = {}
@@ -310,9 +334,7 @@ def parse_artigo(html: str, titulo: str):
     # link de inscrição (primeiro link externo que não é blog/rede social)
     for a in article.find_all("a", href=True):
         href = a["href"]
-        if href.startswith("http") and not re.search(
-                r"grancursosonline|estrategia|facebook|twitter|whatsapp|instagram|"
-                r"telegram|t\.me|youtube|linkedin|tiktok|google\.com|bit\.ly", href):
+        if href.startswith("http") and not LINK_IGNORADO_RE.search(href):
             texto_link = _norm(a.get_text(" ", strip=True))
             if re.search(r"inscri|edital|site|oficial|banca", texto_link) or \
                re.search(r"gov\.br|org\.br|\.br/concurso", href):
@@ -365,6 +387,68 @@ def vale_criar_concurso(art: dict, titulo: str) -> bool:
     return tem_dado or tem_status
 
 
+# ------------------------------------------------------------- fontes
+def _entradas_rss(conteudo: bytes) -> list:
+    feed = feedparser.parse(conteudo)
+    out = []
+    for entry in feed.entries:
+        pub = None
+        if entry.get("published_parsed"):
+            pub = time.strftime("%Y-%m-%dT%H:%M:%S", entry.published_parsed)
+        out.append({
+            "titulo": (entry.get("title") or "").strip(),
+            "link": (entry.get("link") or "").strip(),
+            "pub": pub,
+            "resumo": BeautifulSoup(entry.get("summary", ""), "lxml").get_text(" ", strip=True)[:400],
+        })
+    return out
+
+
+def _entradas_news_sitemap(conteudo: bytes, agora: datetime = None,
+                           max_dias: int = SITEMAP_MAX_DIAS) -> list:
+    """Sitemap Google News (<news:title>, <news:publication_date>), mais novas primeiro."""
+    if conteudo[:2] == b"\x1f\x8b":
+        conteudo = gzip.decompress(conteudo)
+    soup = BeautifulSoup(conteudo, "xml")
+    agora = agora or datetime.now(timezone.utc)
+    limite = agora - timedelta(days=max_dias)
+    out = []
+    for u in soup.find_all("url"):
+        loc, titulo, data = u.find("loc"), u.find("title"), u.find("publication_date")
+        if not (loc and titulo and data):
+            continue
+        try:
+            dt = datetime.fromisoformat(data.get_text(strip=True).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        if dt < limite:
+            continue
+        out.append({
+            "titulo": titulo.get_text(strip=True),
+            "link": loc.get_text(strip=True),
+            "pub": dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
+            "resumo": "",
+            "_dt": dt,
+        })
+    out.sort(key=lambda e: e["_dt"], reverse=True)
+    for e in out:
+        e.pop("_dt")
+    return out
+
+
+def listar_entradas(tipo: str, url: str, session: requests.Session) -> list:
+    """Lista de notícias de uma fonte: [{titulo, link, pub, resumo}]."""
+    r = session.get(url, headers=HEADERS, timeout=30)
+    r.raise_for_status()
+    if tipo == "rss":
+        return _entradas_rss(r.content)
+    if tipo == "news_sitemap":
+        return _entradas_news_sitemap(r.content)
+    raise ValueError(f"tipo de fonte desconhecido: {tipo}")
+
+
 # ----------------------------------------------------------------- run
 def run_scrape(max_articles: int = 60, delay: float = 1.0) -> dict:
     """Executa a coleta completa. Retorna resumo p/ log."""
@@ -379,33 +463,35 @@ def run_scrape(max_articles: int = 60, delay: float = 1.0) -> dict:
         log_id = db.execute("SELECT last_insert_rowid() AS i").fetchone()["i"]
 
     novos = []  # (fonte, titulo, link)
-    for fonte, url in RSS_FEEDS:
+    for fonte, tipo, url in FONTES:
         try:
-            r = session.get(url, headers=HEADERS, timeout=30)
-            r.raise_for_status()
-            feed = feedparser.parse(r.content)
+            entradas = listar_entradas(tipo, url, session)
             qtd = 0
             with dbm.get_db() as db:
-                for entry in feed.entries[:60]:
-                    titulo = (entry.get("title") or "").strip()
-                    link = (entry.get("link") or "").strip()
+                for ent in entradas[:60]:
+                    titulo, link = ent["titulo"], ent["link"]
                     if not titulo or not link or not eh_noticia_de_concurso(titulo):
                         continue
-                    pub = None
-                    if entry.get("published_parsed"):
-                        pub = time.strftime("%Y-%m-%dT%H:%M:%S", entry.published_parsed)
-                    resumo = BeautifulSoup(entry.get("summary", ""), "lxml").get_text(" ", strip=True)[:400]
                     if dbm.upsert_noticia(db, url=link, titulo=titulo, fonte=fonte,
-                                          publicado_em=pub, resumo=resumo):
+                                          publicado_em=ent["pub"], resumo=ent["resumo"]):
                         novos.append((fonte, titulo, link))
                         qtd += 1
             detail_msgs.append(f"{fonte}: {qtd} notícias novas")
         except Exception as e:
             errors += 1
-            detail_msgs.append(f"{fonte}: ERRO RSS {e}")
-            log.warning("RSS %s falhou: %s", fonte, e)
+            detail_msgs.append(f"{fonte}: ERRO {tipo} {e}")
+            log.warning("Fonte %s (%s) falhou: %s", fonte, tipo, e)
 
     found = len(novos)
+
+    # intercala as fontes (A1, B1, C1, A2, B2...) para o limite de artigos
+    # por coleta não ser consumido inteiro pela primeira fonte da lista
+    por_fonte = {}
+    for item in novos:
+        por_fonte.setdefault(item[0], []).append(item)
+    filas = list(por_fonte.values())
+    novos = [fila[i] for i in range(max(map(len, filas), default=0))
+             for fila in filas if i < len(fila)]
 
     # baixa o artigo completo de cada notícia nova e tenta montar o concurso
     for fonte, titulo, link in novos[:max_articles]:
